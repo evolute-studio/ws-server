@@ -78,9 +78,12 @@ wss.on('connection', (ws) => {
 
         case 'check_online':
           console.log('Received check_online request with payload:', payload);
-          if (Array.isArray(payload)) {
-            console.log('Checking online status for players:', payload);
-            const statuses = payload.map(playerId => {
+          const playersData = typeof payload === 'string' ? JSON.parse(payload) : payload;
+          console.log('Parsed players data:', playersData);
+          
+          if (playersData && Array.isArray(playersData.players)) {
+            console.log('Checking online status for players:', playersData.players);
+            const statuses = playersData.players.map(playerId => {
               const isOnline = isPlayerOnline(playerId);
               console.log(`Player ${playerId}: last ping = ${playerLastPing.get(playerId)}, is online = ${isOnline}`);
               return isOnline;
@@ -92,7 +95,7 @@ wss.on('connection', (ws) => {
             }));
             console.log(`Sent online status response:`, statuses);
           } else {
-            console.warn('Invalid payload for check_online, expected array but got:', typeof payload);
+            console.warn('Invalid payload for check_online, expected {players: string[]} but got:', playersData);
           }
           break;
 
