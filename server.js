@@ -89,13 +89,12 @@ wss.on('connection', (ws) => {
               return isOnline;
             });
             console.log('Final statuses:', statuses);
+            const binaryStatuses = statuses.map(status => status ? '1' : '0').join('');
             ws.send(JSON.stringify({
               action: 'online_status',
-              payload: {
-                statuses: statuses
-              }
+              payload: binaryStatuses
             }));
-            console.log(`Sent online status response:`, statuses);
+            console.log(`Sent online status response:`, binaryStatuses);
           } else {
             console.warn('Invalid payload for check_online, expected {players: string[]} but got:', playersData);
           }
