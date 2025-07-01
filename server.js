@@ -5,6 +5,28 @@ console.log('WebSocket server started on ws://localhost:8080');
 
 const channels = new Map(); // channelName -> Set of clients
 const clientChannels = new Map(); // client -> Set of channelNames
+const playerLastPing = new Map(); // playerId -> timestamp
+
+const PLAYER_TIMEOUT = 6000; // 6 seconds timeout
+
+function cleanupInactivePlayers() {
+    const now = Date.now();
+    for (const [playerId, lastPing] of playerLastPing.entries()) {
+        if (now - lastPing >= PLAYER_TIMEOUT) {
+            playerLastPing.delete(playerId);
+            console.log(`Cleaned up inactive player: ${playerId}`);
+        }
+    }
+}
+
+// Запускаємо очищення кожні PLAYER_TIMEOUT мілісекунд
+setInterval(cleanupInactivePlayers, PLAYER_TIMEOUT);
+
+function isPlayerOnline(playerId) {
+    const lastPing = playerLastPing.get(playerId);
+    if (!lastPing) return false;
+    return Date.now() - lastPing < PLAYER_TIMEOUT;
+}
 
 wss.on('connection', (ws) => {
   console.log('Client connected');
@@ -44,6 +66,24 @@ wss.on('connection', (ws) => {
           }
           break;
 
+        case 'ping':
+          if (payload && payload.Address) {
+            playerLastPing.set(payload.Address, Date.now());
+            console.log(`Received ping from player ${payload.Address}`);
+          }
+          break;
+
+        case 'check_online':
+          if (Array.isArray(payload)) {
+            const statuses = payload.map(playerId => isPlayerOnline(playerId));
+            ws.send(JSON.stringify({
+              action: 'online_status',
+              payload: statuses
+            }));
+            console.log(`Checked online status for players:`, payload);
+          }
+          break;
+
         default:
           console.warn('Unknown action:', action);
       }
@@ -61,4 +101,3 @@ wss.on('connection', (ws) => {
     console.log('Client disconnected');
   });
 });
-
