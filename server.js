@@ -67,13 +67,10 @@ wss.on('connection', (ws) => {
           break;
 
         case 'ping':
-          console.log('Received ping', payload);
-          console.log('Payload type:', typeof payload);
-          console.log('Is payload defined?', !!payload);
-          console.log('Is Address defined?', payload && !!payload.Address);
-          if (payload && payload.Address) {
-            playerLastPing.set(payload.Address, Date.now());
-            console.log(`Received ping from player ${payload.Address}`);
+          const pingData = typeof payload === 'string' ? JSON.parse(payload) : payload;
+          if (pingData && pingData.Address) {
+            playerLastPing.set(pingData.Address, Date.now());
+            console.log(`Received ping from player ${pingData.Address}`);
           }
           break;
 
