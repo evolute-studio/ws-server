@@ -67,6 +67,7 @@ wss.on('connection', (ws) => {
           break;
 
         case 'ping':
+          console.log('Received ping', payload);
           if (payload && payload.Address) {
             playerLastPing.set(payload.Address, Date.now());
             console.log(`Received ping from player ${payload.Address}`);
