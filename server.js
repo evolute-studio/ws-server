@@ -91,7 +91,9 @@ wss.on('connection', (ws) => {
             console.log('Final statuses:', statuses);
             ws.send(JSON.stringify({
               action: 'online_status',
-              payload: statuses
+              payload: {
+                statuses: statuses
+              }
             }));
             console.log(`Sent online status response:`, statuses);
           } else {
