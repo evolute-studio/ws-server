@@ -24,6 +24,8 @@ setInterval(cleanupInactivePlayers, PLAYER_TIMEOUT);
 
 function isPlayerOnline(playerId) {
     const lastPing = playerLastPing.get(playerId);
+    const now = Date.now();
+    console.log(`Checking player ${playerId}: lastPing=${lastPing}, now=${now}, diff=${now - lastPing}ms`);
     if (!lastPing) return false;
     return Date.now() - lastPing < PLAYER_TIMEOUT;
 }
@@ -75,13 +77,22 @@ wss.on('connection', (ws) => {
           break;
 
         case 'check_online':
+          console.log('Received check_online request with payload:', payload);
           if (Array.isArray(payload)) {
-            const statuses = payload.map(playerId => isPlayerOnline(playerId));
+            console.log('Checking online status for players:', payload);
+            const statuses = payload.map(playerId => {
+              const isOnline = isPlayerOnline(playerId);
+              console.log(`Player ${playerId}: last ping = ${playerLastPing.get(playerId)}, is online = ${isOnline}`);
+              return isOnline;
+            });
+            console.log('Final statuses:', statuses);
             ws.send(JSON.stringify({
               action: 'online_status',
               payload: statuses
             }));
-            console.log(`Checked online status for players:`, payload);
+            console.log(`Sent online status response:`, statuses);
+          } else {
+            console.warn('Invalid payload for check_online, expected array but got:', typeof payload);
           }
           break;
 
