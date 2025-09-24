@@ -1,7 +1,8 @@
 const WebSocket = require('ws');
 
-const wss = new WebSocket.Server({ port: 8080 });
-console.log('WebSocket server started on ws://localhost:8080');
+const default_port = 7021;
+const wss = new WebSocket.Server({ port: default_port });
+console.log('WebSocket server started on ws://localhost:' + default_port);
 
 const channels = new Map(); // channelName -> Set of clients
 const clientChannels = new Map(); // client -> Set of channelNames
