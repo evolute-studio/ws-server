@@ -1,120 +1,239 @@
+/**
+ * Main WebSocket server for Evolute Kingdom: Mage Duel
+ * Modular architecture with separate managers for different responsibilities
+ */
+
 const WebSocket = require('ws');
 
-const default_port = 7021;
-const wss = new WebSocket.Server({ port: default_port });
-console.log('WebSocket server started on ws://localhost:' + default_port);
+// Import configuration
+const { SERVER_CONFIG } = require('./src/config/constants');
 
-const channels = new Map(); // channelName -> Set of clients
-const clientChannels = new Map(); // client -> Set of channelNames
-const playerLastPing = new Map(); // playerId -> timestamp
+// Import managers
+const Logger = require('./src/utils/logger');
+const ChannelManager = require('./src/managers/ChannelManager');
+const PlayerManager = require('./src/managers/PlayerManager');
+const LobbyManager = require('./src/managers/LobbyManager');
+const MessageHandler = require('./src/handlers/MessageHandler');
 
-const PLAYER_TIMEOUT = 6000; // 6 seconds timeout
+/**
+ * Main server class
+ */
+class EvoluteWebSocketServer {
+  constructor() {
+    this.logger = new Logger('EvoluteWS', process.env.LOG_LEVEL || 'info');
+    this.server = null;
+    this.messageHandler = null;
 
-function cleanupInactivePlayers() {
-    const now = Date.now();
-    for (const [playerId, lastPing] of playerLastPing.entries()) {
-        if (now - lastPing >= PLAYER_TIMEOUT) {
-            playerLastPing.delete(playerId);
-            console.log(`Cleaned up inactive player: ${playerId}`);
-        }
-    }
-}
+    // Initialize managers
+    this.initializeManagers();
 
-// Запускаємо очищення кожні PLAYER_TIMEOUT мілісекунд
-setInterval(cleanupInactivePlayers, PLAYER_TIMEOUT);
+    // Setup graceful shutdown
+    this.setupGracefulShutdown();
+  }
 
-function isPlayerOnline(playerId) {
-    const lastPing = playerLastPing.get(playerId);
-    const now = Date.now();
-    console.log(`Checking player ${playerId}: lastPing=${lastPing}, now=${now}, diff=${now - lastPing}ms`);
-    if (!lastPing) return false;
-    return Date.now() - lastPing < PLAYER_TIMEOUT;
-}
+  /**
+   * Initialize all managers
+   */
+  initializeManagers() {
+    this.logger.info('Initializing managers...');
 
-wss.on('connection', (ws) => {
-  console.log('Client connected');
+    // Initialize managers in dependency order
+    this.channelManager = new ChannelManager(this.logger);
+    this.playerManager = new PlayerManager(this.logger);
+    this.lobbyManager = new LobbyManager(this.logger, this.playerManager, this.channelManager);
+    this.messageHandler = new MessageHandler(
+      this.logger,
+      this.channelManager,
+      this.playerManager,
+      this.lobbyManager
+    );
 
-  clientChannels.set(ws, new Set());
+    this.logger.info('All managers initialized successfully');
+  }
 
-  ws.on('message', (message) => {
+  /**
+   * Start the WebSocket server
+   */
+  start() {
     try {
-      const data = JSON.parse(message);
-      const { action, channel, payload } = data;
+      const port = SERVER_CONFIG.DEFAULT_PORT;
+      this.server = new WebSocket.Server({
+        port,
+        perMessageDeflate: false // Disable compression for better performance
+      });
 
-      switch (action) {
-        case 'subscribe':
-          if (!channels.has(channel)) channels.set(channel, new Set());
-          channels.get(channel).add(ws);
-          clientChannels.get(ws).add(channel);
-          console.log(`Client subscribed to ${channel}`);
-          break;
+      this.logger.info(`WebSocket server starting on ws://${SERVER_CONFIG.HOST}:${port}`);
 
-        case 'unsubscribe':
-          if (channels.has(channel)) {
-            channels.get(channel).delete(ws);
-            clientChannels.get(ws).delete(channel);
-            console.log(`Client unsubscribed from ${channel}`);
-          }
-          break;
+      // Handle new connections
+      this.server.on('connection', (ws, req) => {
+        this.handleConnection(ws, req);
+      });
 
-        case 'publish':
-          if (channels.has(channel)) {
-            const msg = JSON.stringify({ channel, payload });
-            for (const client of channels.get(channel)) {
-              if (client.readyState === WebSocket.OPEN) {
-                client.send(msg);
+      // Handle server events
+      this.server.on('error', (error) => {
+        this.logger.error('WebSocket server error:', error);
+      });
+
+      this.server.on('listening', () => {
+        this.logger.info(`WebSocket server successfully started on port ${port}`);
+        this.logServerInfo();
+      });
+
+      // Log statistics periodically (every 5 minutes)
+      setInterval(() => {
+        this.logStatistics();
+      }, 5 * 60 * 1000);
+
+    } catch (error) {
+      this.logger.error('Failed to start WebSocket server:', error);
+      process.exit(1);
+    }
+  }
+
+  /**
+   * Handle new WebSocket connection
+   * @param {WebSocket} ws - WebSocket connection
+   * @param {IncomingMessage} req - HTTP request object
+   */
+  handleConnection(ws, req) {
+    const clientIP = req.socket.remoteAddress;
+    this.logger.info(`New client connected from ${clientIP}`);
+
+    // Initialize client with channel manager
+    this.channelManager.initClient(ws);
+
+    // Set up message handler
+    ws.on('message', (message) => {
+      this.messageHandler.handleMessage(ws, message);
+    });
+
+    // Handle client disconnection
+    ws.on('close', (code, reason) => {
+      this.logger.info(`Client disconnected: ${code} - ${reason}`);
+      this.messageHandler.handleClientDisconnect(ws);
+    });
+
+    // Handle WebSocket errors
+    ws.on('error', (error) => {
+      this.logger.error('WebSocket connection error:', error);
+    });
+
+    // Send welcome message (optional)
+    try {
+      ws.send(JSON.stringify({
+        action: 'connected',
+        payload: {
+          message: 'Connected to Evolute Kingdom WebSocket Server',
+          timestamp: Date.now(),
+          serverVersion: '2.0.0'
+        }
+      }));
+    } catch (error) {
+      this.logger.warn('Failed to send welcome message:', error);
+    }
+  }
+
+  /**
+   * Log server information
+   */
+  logServerInfo() {
+    this.logger.info('=== Server Information ===');
+    this.logger.info(`Host: ${SERVER_CONFIG.HOST}`);
+    this.logger.info(`Port: ${SERVER_CONFIG.DEFAULT_PORT}`);
+    this.logger.info(`Node.js Version: ${process.version}`);
+    this.logger.info(`Platform: ${process.platform}`);
+    this.logger.info(`PID: ${process.pid}`);
+    this.logger.info('========================');
+  }
+
+  /**
+   * Log server statistics
+   */
+  logStatistics() {
+    try {
+      const stats = this.messageHandler.getStats();
+
+      this.logger.info('=== Server Statistics ===');
+      this.logger.info(`Connected clients: ${stats.channelStats.totalClients}`);
+      this.logger.info(`Active channels: ${stats.channelStats.totalChannels}`);
+      this.logger.info(`Online players: ${stats.playerStats.onlinePlayers}`);
+      this.logger.info(`Total tracked players: ${stats.playerStats.totalPlayers}`);
+      this.logger.info(`Active lobbies: ${stats.lobbyStats.totalLobbies}`);
+      this.logger.info(`Players in lobbies: ${stats.lobbyStats.totalPlayers}`);
+      this.logger.info(`Active matches: ${stats.lobbyStats.totalMatches}`);
+      this.logger.info(`Memory usage: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
+      this.logger.info('=========================');
+    } catch (error) {
+      this.logger.error('Error logging statistics:', error);
+    }
+  }
+
+  /**
+   * Gracefully shutdown the server
+   */
+  async shutdown() {
+    this.logger.info('Starting graceful shutdown...');
+
+    if (this.server) {
+      // Close server to new connections
+      this.server.close(() => {
+        this.logger.info('WebSocket server closed');
+      });
+
+      // Notify all connected clients
+      this.server.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          try {
+            client.send(JSON.stringify({
+              action: 'server_shutdown',
+              payload: {
+                message: 'Server is shutting down',
+                timestamp: Date.now()
               }
-            }
-            console.log(`Message in channel ${channel}:`, payload);
-          }
-          break;
-
-        case 'ping':
-          const pingData = typeof payload === 'string' ? JSON.parse(payload) : payload;
-          if (pingData && pingData.Address) {
-            playerLastPing.set(pingData.Address, Date.now());
-            console.log(`Received ping from player ${pingData.Address}`);
-          }
-          break;
-
-        case 'check_online':
-          console.log('Received check_online request with payload:', payload);
-          const playersData = typeof payload === 'string' ? JSON.parse(payload) : payload;
-          console.log('Parsed players data:', playersData);
-          
-          if (playersData && Array.isArray(playersData.players)) {
-            console.log('Checking online status for players:', playersData.players);
-            const statuses = playersData.players.map(playerId => {
-              const isOnline = isPlayerOnline(playerId);
-              console.log(`Player ${playerId}: last ping = ${playerLastPing.get(playerId)}, is online = ${isOnline}`);
-              return isOnline;
-            });
-            console.log('Final statuses:', statuses);
-            const binaryStatuses = statuses.map(status => status ? '1' : '0').join('');
-            ws.send(JSON.stringify({
-              action: 'online_status',
-              payload: binaryStatuses
             }));
-            console.log(`Sent online status response:`, binaryStatuses);
-          } else {
-            console.warn('Invalid payload for check_online, expected {players: string[]} but got:', playersData);
+            client.close(1000, 'Server shutdown');
+          } catch (error) {
+            this.logger.warn('Error notifying client of shutdown:', error);
           }
-          break;
-
-        default:
-          console.warn('Unknown action:', action);
-      }
-    } catch (err) {
-      console.error('Error processing message:', err);
+        }
+      });
     }
-  });
 
-  ws.on('close', () => {
-    // Очистити всі підписки
-    for (const channel of clientChannels.get(ws)) {
-      channels.get(channel)?.delete(ws);
-    }
-    clientChannels.delete(ws);
-    console.log('Client disconnected');
-  });
-});
+    // Give clients time to disconnect gracefully
+    setTimeout(() => {
+      this.logger.info('Graceful shutdown completed');
+      process.exit(0);
+    }, 2000);
+  }
+
+  /**
+   * Setup graceful shutdown handlers
+   */
+  setupGracefulShutdown() {
+    // Handle various shutdown signals
+    const shutdownSignals = ['SIGINT', 'SIGTERM', 'SIGUSR2'];
+
+    shutdownSignals.forEach((signal) => {
+      process.on(signal, () => {
+        this.logger.info(`Received ${signal}, initiating graceful shutdown...`);
+        this.shutdown();
+      });
+    });
+
+    // Handle uncaught exceptions
+    process.on('uncaughtException', (error) => {
+      this.logger.error('Uncaught Exception:', error);
+      this.shutdown();
+    });
+
+    // Handle unhandled promise rejections
+    process.on('unhandledRejection', (reason, promise) => {
+      this.logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+      this.shutdown();
+    });
+  }
+}
+
+// Create and start the server
+const server = new EvoluteWebSocketServer();
+server.start();
