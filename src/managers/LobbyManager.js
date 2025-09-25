@@ -3,10 +3,10 @@ const {
   LOBBY_CONFIG,
   PLAYER_ROLES,
   LOBBY_STATUS,
-  MATCH_STATUS,
   EVENTS,
   ERROR_TYPES
 } = require('../config/constants');
+const Lobby = require('../models/Lobby');
 
 /**
  * Manages lobby system: creation, joining, invitations, matches
@@ -78,19 +78,7 @@ class LobbyManager {
       }
 
       const code = this.generateLobbyCode();
-      const now = Date.now();
-
-      const lobby = {
-        code,
-        host: hostId,
-        players: [hostId],
-        spectators: [],
-        status: LOBBY_STATUS.WAITING,
-        created: now,
-        lastActivity: now,
-        currentMatch: null,
-        chatHistory: []
-      };
+      const lobby = new Lobby(code, hostId);
 
       this.lobbies.set(code, lobby);
       this.playerLobbies.set(hostId, code);
@@ -105,7 +93,7 @@ class LobbyManager {
 
       return {
         success: true,
-        lobby: this.sanitizeLobbyForClient(lobby),
+        lobby: lobby.toClientData(),
         event: EVENTS.LOBBY_CREATED
       };
 
@@ -175,14 +163,14 @@ class LobbyManager {
 
       // Check capacity based on role
       if (role === PLAYER_ROLES.PLAYER) {
-        if (lobby.players.length >= LOBBY_CONFIG.MAX_PLAYERS) {
+        if (!lobby.hasPlayerSlots()) {
           // Try to join as spectator instead
           role = PLAYER_ROLES.SPECTATOR;
         }
       }
 
       if (role === PLAYER_ROLES.SPECTATOR) {
-        if (lobby.spectators.length >= LOBBY_CONFIG.MAX_SPECTATORS) {
+        if (!lobby.hasSpectatorSlots()) {
           return {
             success: false,
             error: ERROR_TYPES.LOBBY_FULL,
@@ -191,14 +179,15 @@ class LobbyManager {
         }
       }
 
-      // Add player to appropriate list
-      if (role === PLAYER_ROLES.PLAYER) {
-        lobby.players.push(playerId);
-      } else {
-        lobby.spectators.push(playerId);
+      // Add player using Lobby class method
+      if (!lobby.addPlayer(playerId, role)) {
+        return {
+          success: false,
+          error: ERROR_TYPES.LOBBY_FULL,
+          message: 'Failed to add player to lobby'
+        };
       }
 
-      lobby.lastActivity = Date.now();
       this.playerLobbies.set(playerId, lobbyCode);
 
       // Subscribe player to lobby channel
@@ -207,23 +196,18 @@ class LobbyManager {
         this.channelManager.subscribe(playerConnection, `lobby_${lobbyCode}`);
       }
 
-      // Update lobby status if needed
-      if (lobby.players.length === LOBBY_CONFIG.MAX_PLAYERS && lobby.status === LOBBY_STATUS.WAITING) {
-        lobby.status = LOBBY_STATUS.READY;
-      }
-
       // Notify all lobby members
       this.broadcastToLobby(lobbyCode, EVENTS.LOBBY_JOINED, {
         playerId,
         role,
-        lobby: this.sanitizeLobbyForClient(lobby)
+        lobby: lobby.toClientData()
       });
 
       this.logger.info(`Player ${playerId} joined lobby ${lobbyCode} as ${role}`);
 
       return {
         success: true,
-        lobby: this.sanitizeLobbyForClient(lobby),
+        lobby: lobby.toClientData(),
         role,
         event: EVENTS.LOBBY_JOINED
       };
@@ -266,12 +250,15 @@ class LobbyManager {
       }
 
       // Remove player from lobby
-      const wasPlayer = lobby.players.includes(playerId);
-      const wasSpectator = lobby.spectators.includes(playerId);
-
-      lobby.players = lobby.players.filter(id => id !== playerId);
-      lobby.spectators = lobby.spectators.filter(id => id !== playerId);
-      lobby.lastActivity = Date.now();
+      const removeResult = lobby.removePlayer(playerId);
+      if (!removeResult.success) {
+        return {
+          success: false,
+          error: ERROR_TYPES.PLAYER_NOT_FOUND,
+          message: 'Player not found in lobby'
+        };
+      }
+      // const wasPlayer = removeResult.role === PLAYER_ROLES.PLAYER;  // Not used here
 
       this.playerLobbies.delete(playerId);
 
@@ -282,7 +269,7 @@ class LobbyManager {
       }
 
       // Handle host leaving
-      if (lobby.host === playerId) {
+      if (lobby.isHost(playerId)) {
         if (lobby.players.length > 0) {
           // Transfer host to first remaining player
           lobby.host = lobby.players[0];
@@ -306,7 +293,7 @@ class LobbyManager {
       // Notify remaining lobby members
       this.broadcastToLobby(lobbyCode, EVENTS.LOBBY_LEFT, {
         playerId,
-        role: wasPlayer ? PLAYER_ROLES.PLAYER : PLAYER_ROLES.SPECTATOR,
+        role: removeResult.role,
         lobby: this.sanitizeLobbyForClient(lobby)
       });
 
@@ -415,7 +402,7 @@ class LobbyManager {
         this.channelManager.sendToClient(targetConnection, EVENTS.INVITATION_RECEIVED, {
           invitation: {
             ...invitation,
-            lobbyInfo: this.sanitizeLobbyForClient(lobby)
+            lobbyInfo: lobby.toClientData()
           }
         });
       }
@@ -588,7 +575,7 @@ class LobbyManager {
       }
 
       const lobby = this.lobbies.get(lobbyCode);
-      if (!lobby || lobby.host !== hostId) {
+      if (!lobby || !lobby.isHost(hostId)) {
         return {
           success: false,
           error: ERROR_TYPES.PERMISSION_DENIED,
@@ -596,7 +583,7 @@ class LobbyManager {
         };
       }
 
-      if (!lobby.players.includes(targetPlayerId) && !lobby.spectators.includes(targetPlayerId)) {
+      if (!lobby.hasMember(targetPlayerId)) {
         return {
           success: false,
           error: ERROR_TYPES.PLAYER_NOT_FOUND,
@@ -613,9 +600,7 @@ class LobbyManager {
       }
 
       // Remove player
-      lobby.players = lobby.players.filter(id => id !== targetPlayerId);
-      lobby.spectators = lobby.spectators.filter(id => id !== targetPlayerId);
-      lobby.lastActivity = Date.now();
+      lobby.removePlayer(targetPlayerId);
 
       this.playerLobbies.delete(targetPlayerId);
 
@@ -633,7 +618,7 @@ class LobbyManager {
       this.broadcastToLobby(lobbyCode, EVENTS.PLAYER_KICKED, {
         kickedPlayerId: targetPlayerId,
         kickedBy: hostId,
-        lobby: this.sanitizeLobbyForClient(lobby)
+        lobby: lobby.toClientData()
       });
 
       this.logger.info(`Player ${targetPlayerId} kicked from lobby ${lobbyCode} by ${hostId}`);
@@ -649,6 +634,77 @@ class LobbyManager {
         success: false,
         error: ERROR_TYPES.PERMISSION_DENIED,
         message: 'Failed to kick player'
+      };
+    }
+  }
+
+  /**
+   * Change player role between player and spectator
+   * @param {string} playerId - Player ID requesting role change
+   * @param {string} newRole - New role (player or spectator)
+   * @returns {Object} Result object
+   */
+  changeRole(playerId, newRole) {
+    try {
+      // Validate role (only player and spectator are allowed)
+      if (newRole !== PLAYER_ROLES.PLAYER && newRole !== PLAYER_ROLES.SPECTATOR) {
+        return {
+          success: false,
+          error: ERROR_TYPES.INVALID_PAYLOAD,
+          message: 'Invalid role specified. Only player and spectator roles are allowed'
+        };
+      }
+
+      const lobbyCode = this.playerLobbies.get(playerId);
+      if (!lobbyCode) {
+        return {
+          success: false,
+          error: ERROR_TYPES.LOBBY_NOT_FOUND,
+          message: 'Player is not in any lobby'
+        };
+      }
+
+      const lobby = this.lobbies.get(lobbyCode);
+      if (!lobby) {
+        return {
+          success: false,
+          error: ERROR_TYPES.LOBBY_NOT_FOUND,
+          message: 'Lobby not found'
+        };
+      }
+
+      // Use Lobby class method to change role
+      const changeResult = lobby.changePlayerRole(playerId, newRole);
+      if (!changeResult.success) {
+        return {
+          success: false,
+          error: ERROR_TYPES.INVALID_PAYLOAD,
+          message: changeResult.message
+        };
+      }
+
+      // Broadcast role change to all lobby members
+      this.broadcastToLobby(lobbyCode, EVENTS.ROLE_CHANGED, {
+        playerId,
+        newRole: changeResult.newRole,
+        lobby: lobby.toClientData()
+      });
+
+      this.logger.info(`Player ${playerId} changed role to ${changeResult.newRole} in lobby ${lobbyCode}`);
+
+      return {
+        success: true,
+        newRole: changeResult.newRole,
+        lobby: lobby.toClientData(),
+        event: EVENTS.ROLE_CHANGED
+      };
+
+    } catch (error) {
+      this.logger.error('Error changing role:', error);
+      return {
+        success: false,
+        error: ERROR_TYPES.UNKNOWN_ERROR,
+        message: 'Failed to change role'
       };
     }
   }
@@ -679,19 +735,8 @@ class LobbyManager {
         };
       }
 
-      const chatMessage = {
-        playerId,
-        message: message.trim(),
-        timestamp: Date.now()
-      };
-
-      // Add to chat history (keep last 50 messages)
-      lobby.chatHistory.push(chatMessage);
-      if (lobby.chatHistory.length > 50) {
-        lobby.chatHistory = lobby.chatHistory.slice(-50);
-      }
-
-      lobby.lastActivity = Date.now();
+      // Add chat message using Lobby class method
+      const chatMessage = lobby.addChatMessage(playerId, message);
 
       // Broadcast to all lobby members
       this.broadcastToLobby(lobbyCode, EVENTS.LOBBY_CHAT_MESSAGE, chatMessage);
@@ -710,168 +755,7 @@ class LobbyManager {
       };
     }
   }
-
-  /**
-   * Start match between lobby players
-   * @param {string} hostId - Host player ID
-   * @returns {Object} Result object
-   */
-  startMatch(hostId) {
-    try {
-      const lobbyCode = this.playerLobbies.get(hostId);
-      if (!lobbyCode) {
-        return {
-          success: false,
-          error: ERROR_TYPES.LOBBY_NOT_FOUND,
-          message: 'Host is not in any lobby'
-        };
-      }
-
-      const lobby = this.lobbies.get(lobbyCode);
-      if (!lobby || lobby.host !== hostId) {
-        return {
-          success: false,
-          error: ERROR_TYPES.PERMISSION_DENIED,
-          message: 'Only lobby host can start match'
-        };
-      }
-
-      if (lobby.players.length !== LOBBY_CONFIG.MAX_PLAYERS) {
-        return {
-          success: false,
-          error: ERROR_TYPES.LOBBY_NOT_FOUND,
-          message: `Need exactly ${LOBBY_CONFIG.MAX_PLAYERS} players to start match`
-        };
-      }
-
-      if (lobby.status !== LOBBY_STATUS.READY) {
-        return {
-          success: false,
-          error: ERROR_TYPES.MATCH_ERROR,
-          message: 'Lobby is not ready for match'
-        };
-      }
-
-      // Create match
-      const matchId = `match_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      const match = {
-        id: matchId,
-        lobbyCode,
-        players: [...lobby.players],
-        status: MATCH_STATUS.STARTING,
-        startTime: Date.now(),
-        endTime: null,
-        winner: null
-      };
-
-      this.lobbyMatches.set(matchId, match);
-      lobby.currentMatch = matchId;
-      lobby.status = LOBBY_STATUS.IN_GAME;
-      lobby.lastActivity = Date.now();
-
-      // Broadcast match start
-      this.broadcastToLobby(lobbyCode, EVENTS.MATCH_STARTED, {
-        match: {
-          id: matchId,
-          players: match.players,
-          startTime: match.startTime
-        },
-        lobby: this.sanitizeLobbyForClient(lobby)
-      });
-
-      this.logger.info(`Match ${matchId} started in lobby ${lobbyCode}`);
-
-      return {
-        success: true,
-        match,
-        event: EVENTS.MATCH_STARTED
-      };
-
-    } catch (error) {
-      this.logger.error('Error starting match:', error);
-      return {
-        success: false,
-        error: ERROR_TYPES.MATCH_ERROR,
-        message: 'Failed to start match'
-      };
-    }
-  }
-
-  /**
-   * End match
-   * @param {string} matchId - Match ID
-   * @param {string} winner - Winner player ID (optional)
-   * @returns {Object} Result object
-   */
-  endMatch(matchId, winner = null) {
-    try {
-      const match = this.lobbyMatches.get(matchId);
-      if (!match) {
-        return {
-          success: false,
-          error: ERROR_TYPES.MATCH_ERROR,
-          message: 'Match not found'
-        };
-      }
-
-      const lobby = this.lobbies.get(match.lobbyCode);
-      if (!lobby) {
-        return {
-          success: false,
-          error: ERROR_TYPES.LOBBY_NOT_FOUND,
-          message: 'Lobby not found for match'
-        };
-      }
-
-      match.status = MATCH_STATUS.FINISHED;
-      match.endTime = Date.now();
-      match.winner = winner;
-
-      lobby.status = LOBBY_STATUS.FINISHED;
-      lobby.currentMatch = null;
-      lobby.lastActivity = Date.now();
-
-      // Broadcast match end
-      this.broadcastToLobby(match.lobbyCode, EVENTS.MATCH_ENDED, {
-        match: {
-          id: matchId,
-          players: match.players,
-          startTime: match.startTime,
-          endTime: match.endTime,
-          winner: match.winner,
-          duration: match.endTime - match.startTime
-        },
-        lobby: this.sanitizeLobbyForClient(lobby)
-      });
-
-      this.logger.info(`Match ${matchId} ended in lobby ${match.lobbyCode}, winner: ${winner || 'none'}`);
-
-      // After a short delay, reset lobby status to allow new match
-      setTimeout(() => {
-        if (this.lobbies.has(match.lobbyCode)) {
-          const currentLobby = this.lobbies.get(match.lobbyCode);
-          if (currentLobby.status === LOBBY_STATUS.FINISHED) {
-            currentLobby.status = LOBBY_STATUS.READY;
-          }
-        }
-      }, 5000);
-
-      return {
-        success: true,
-        match,
-        event: EVENTS.MATCH_ENDED
-      };
-
-    } catch (error) {
-      this.logger.error('Error ending match:', error);
-      return {
-        success: false,
-        error: ERROR_TYPES.MATCH_ERROR,
-        message: 'Failed to end match'
-      };
-    }
-  }
-
+  
   /**
    * Close lobby and clean up
    * @param {string} lobbyCode - Lobby code
@@ -915,35 +799,30 @@ class LobbyManager {
   }
 
   /**
-   * Get player role in lobby
+   * Get player role in lobby (deprecated - use lobby.getPlayerRole instead)
    * @param {string} playerId - Player ID
    * @param {Object} lobby - Lobby object
    * @returns {string} Player role
    */
   getPlayerRole(playerId, lobby) {
-    if (lobby.host === playerId) return PLAYER_ROLES.HOST;
-    if (lobby.players.includes(playerId)) return PLAYER_ROLES.PLAYER;
-    if (lobby.spectators.includes(playerId)) return PLAYER_ROLES.SPECTATOR;
-    return null;
+    return lobby.getPlayerRole(playerId);
   }
 
   /**
-   * Sanitize lobby object for client (remove sensitive info)
+   * Update lobby status based on player count (deprecated - Lobby class handles this)
+   * @param {Object} lobby - Lobby object
+   */
+  updateLobbyStatus(lobby) {
+    lobby.updateStatus();
+  }
+
+  /**
+   * Sanitize lobby object for client (deprecated - use lobby.toClientData instead)
    * @param {Object} lobby - Full lobby object
    * @returns {Object} Sanitized lobby object
    */
   sanitizeLobbyForClient(lobby) {
-    return {
-      code: lobby.code,
-      host: lobby.host,
-      players: lobby.players,
-      spectators: lobby.spectators,
-      status: lobby.status,
-      created: lobby.created,
-      lastActivity: lobby.lastActivity,
-      currentMatch: lobby.currentMatch,
-      chatHistory: lobby.chatHistory || []
-    };
+    return lobby.toClientData();
   }
 
   /**
@@ -980,11 +859,10 @@ class LobbyManager {
    * Clean up inactive lobbies
    */
   cleanupLobbies() {
-    const now = Date.now();
     const lobbiesToClose = [];
 
     for (const [lobbyCode, lobby] of this.lobbies.entries()) {
-      if (now - lobby.lastActivity >= TIMEOUTS.LOBBY_TIMEOUT) {
+      if (lobby.isInactive(TIMEOUTS.LOBBY_TIMEOUT)) {
         lobbiesToClose.push(lobbyCode);
       }
     }

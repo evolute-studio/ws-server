@@ -332,8 +332,8 @@ async function testLobbyManager() {
     TestAssertions.assertErrorResult(selfKick, ERROR_TYPES.PERMISSION_DENIED, 'Host self-kick should fail');
   });
 
-  // Test 15: Match system
-  runner.addTest('Match system', async (cleanup) => {
+  // Test 15: Role change system
+  runner.addTest('Role change system', async (cleanup) => {
     const channelManager = new ChannelManager(logger);
     const playerManager = new PlayerManager(logger);
     const lobbyManager = new LobbyManager(logger, playerManager, channelManager);
@@ -341,45 +341,55 @@ async function testLobbyManager() {
     const hostId = createTestPlayer(playerManager);
     const playerId = createTestPlayer(playerManager);
 
-    // Create lobby with 2 players
+    // Create lobby
     const createResult = lobbyManager.createLobby(hostId);
     const lobbyCode = createResult.lobby.code;
-    lobbyManager.joinLobby(playerId, lobbyCode);
 
-    // Start match
-    const matchResult = lobbyManager.startMatch(hostId);
-    TestAssertions.assertSuccessResult(matchResult, 'Starting match should succeed');
-    TestAssertions.assertNotNull(matchResult.match, 'Match object should be returned');
-    TestAssertions.assertArrayContains(matchResult.match.players, hostId, 'Match should include host');
-    TestAssertions.assertArrayContains(matchResult.match.players, playerId, 'Match should include player');
+    // Player joins as player, then becomes spectator
+    lobbyManager.joinLobby(playerId, lobbyCode, PLAYER_ROLES.PLAYER);
 
-    // Check lobby status
-    const lobbyInfo = lobbyManager.getLobbyInfo(lobbyCode);
-    TestAssertions.assertEquals(lobbyInfo.lobby.status, LOBBY_STATUS.IN_GAME, 'Lobby should be in game');
+    const changeToSpectator = lobbyManager.changeRole(playerId, PLAYER_ROLES.SPECTATOR);
+    TestAssertions.assertSuccessResult(changeToSpectator, 'Change to spectator should succeed');
+    TestAssertions.assertEquals(changeToSpectator.newRole, PLAYER_ROLES.SPECTATOR, 'New role should be spectator');
 
-    // End match
-    const endResult = lobbyManager.endMatch(matchResult.match.id, hostId);
-    TestAssertions.assertSuccessResult(endResult, 'Ending match should succeed');
-    TestAssertions.assertEquals(endResult.match.winner, hostId, 'Winner should be set correctly');
+    // Verify player is now in spectators array
+    const lobbyInfo1 = lobbyManager.getLobbyInfo(lobbyCode);
+    TestAssertions.assertArrayContains(lobbyInfo1.lobby.spectators, playerId, 'Player should be in spectators');
+    TestAssertions.assertArrayNotContains(lobbyInfo1.lobby.players, playerId, 'Player should not be in players');
+
+    // Change back to player
+    const changeToPlayer = lobbyManager.changeRole(playerId, PLAYER_ROLES.PLAYER);
+    TestAssertions.assertSuccessResult(changeToPlayer, 'Change to player should succeed');
+    TestAssertions.assertEquals(changeToPlayer.newRole, PLAYER_ROLES.PLAYER, 'New role should be player');
+
+    // Verify player is now in players array
+    const lobbyInfo2 = lobbyManager.getLobbyInfo(lobbyCode);
+    TestAssertions.assertArrayContains(lobbyInfo2.lobby.players, playerId, 'Player should be in players');
+    TestAssertions.assertArrayNotContains(lobbyInfo2.lobby.spectators, playerId, 'Player should not be in spectators');
   });
 
-  // Test 16: Match validation
-  runner.addTest('Match validation', async (cleanup) => {
+  // Test 16: Role change validation
+  runner.addTest('Role change validation', async (cleanup) => {
     const channelManager = new ChannelManager(logger);
     const playerManager = new PlayerManager(logger);
     const lobbyManager = new LobbyManager(logger, playerManager, channelManager);
 
     const hostId = createTestPlayer(playerManager);
 
-    // Try to start match with only 1 player (should fail)
+    // Create lobby
     lobbyManager.createLobby(hostId);
-    const onePlayerMatch = lobbyManager.startMatch(hostId);
-    TestAssertions.assertErrorResult(onePlayerMatch, ERROR_TYPES.LOBBY_NOT_FOUND, 'Match with 1 player should fail');
 
-    // Try to start match as non-host (should fail)
-    const playerId = createTestPlayer(playerManager);
-    const nonHostMatch = lobbyManager.startMatch(playerId);
-    TestAssertions.assertErrorResult(nonHostMatch, ERROR_TYPES.LOBBY_NOT_FOUND, 'Non-host match start should fail');
+    // Try to change to invalid role
+    const invalidRole = lobbyManager.changeRole(hostId, 'invalid_role');
+    TestAssertions.assertErrorResult(invalidRole, ERROR_TYPES.INVALID_PAYLOAD, 'Invalid role should fail');
+
+    // Try to change to same role
+    const sameRole = lobbyManager.changeRole(hostId, PLAYER_ROLES.PLAYER);
+    TestAssertions.assertErrorResult(sameRole, ERROR_TYPES.INVALID_PAYLOAD, 'Same role should fail');
+
+    // Try to change role for non-existent player
+    const nonExistent = lobbyManager.changeRole('non_existent_player', PLAYER_ROLES.SPECTATOR);
+    TestAssertions.assertErrorResult(nonExistent, ERROR_TYPES.LOBBY_NOT_FOUND, 'Non-existent player should fail');
   });
 
   // Test 17: Lobby chat system
@@ -425,7 +435,7 @@ async function testLobbyManager() {
     const hostInfo = lobbyManager.getLobbyInfo(lobbyCode, hostId);
     TestAssertions.assertSuccessResult(hostInfo, 'Getting lobby info should succeed');
     TestAssertions.assertTrue(hostInfo.isHost, 'Host should be identified as host');
-    TestAssertions.assertEquals(hostInfo.playerRole, PLAYER_ROLES.HOST, 'Host role should be correct');
+    TestAssertions.assertEquals(hostInfo.playerRole, PLAYER_ROLES.PLAYER, 'Host role should be correct');
 
     // Join and get info as player
     lobbyManager.joinLobby(playerId, lobbyCode);
@@ -458,17 +468,15 @@ async function testLobbyManager() {
     const player2 = createTestPlayer(playerManager);
     lobbyManager.joinLobby(player2, lobbies[1].lobby.code);
 
-    // Start match in third lobby
+    // Third lobby with 2 players (ready status)
     const player3 = createTestPlayer(playerManager);
     lobbyManager.joinLobby(player3, lobbies[2].lobby.code);
-    lobbyManager.startMatch(hosts[2]);
 
     const stats = lobbyManager.getStats();
     TestAssertions.assertEquals(stats.totalLobbies, 3, 'Should have 3 lobbies');
     TestAssertions.assertEquals(stats.totalPlayers, 5, 'Should have 5 players total (3 hosts + 2 joined players)');
     TestAssertions.assertEquals(stats.lobbyStatuses[LOBBY_STATUS.WAITING], 1, 'Should have 1 waiting lobby');
-    TestAssertions.assertEquals(stats.lobbyStatuses[LOBBY_STATUS.READY], 1, 'Should have 1 ready lobby');
-    TestAssertions.assertEquals(stats.lobbyStatuses[LOBBY_STATUS.IN_GAME], 1, 'Should have 1 in-game lobby');
+    TestAssertions.assertEquals(stats.lobbyStatuses[LOBBY_STATUS.READY], 2, 'Should have 2 ready lobbies');
   });
 
   // Test 20: Error handling and edge cases

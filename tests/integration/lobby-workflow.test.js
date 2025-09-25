@@ -119,8 +119,8 @@ async function testLobbyWorkflow() {
     TestAssertions.assertTrue(lobbyInfoResponse.payload.isHost, 'Host should be identified correctly');
   });
 
-  // Test 2: Match workflow with spectators
-  runner.addTest('Match workflow with spectators', async (cleanup) => {
+  // Test 2: Role change workflow with spectators
+  runner.addTest('Role change workflow with spectators', async (cleanup) => {
     // Setup system
     const channelManager = new ChannelManager(logger);
     const playerManager = new PlayerManager(logger);
@@ -155,47 +155,46 @@ async function testLobbyWorkflow() {
     channelManager.subscribe(playerClient, `lobby_${lobbyResult.lobby.code}`);
     channelManager.subscribe(spectatorClient, `lobby_${lobbyResult.lobby.code}`);
 
-    // Start match
-    const startMatchMessage = TestDataGenerator.generateWebSocketMessage(ACTIONS.START_MATCH, { hostId });
-    await messageHandler.handleMessage(hostClient, startMatchMessage);
-
-    // Verify all clients received match started event
-    await wait(10);
-    TestAssertions.assertTrue(hostClient.getSentMessages().length > 0, 'Host should receive match started');
-    TestAssertions.assertTrue(playerClient.getSentMessages().length > 0, 'Player should receive match started');
-    TestAssertions.assertTrue(spectatorClient.getSentMessages().length > 0, 'Spectator should receive match started');
-
-
-    // Host receives both channel broadcast and direct response - use direct response (should be last)
-    const hostMessages = hostClient.getSentMessages();
-    const hostMatchResponse = JSON.parse(hostMessages[hostMessages.length - 1].data);
-    TestAssertions.assertEquals(hostMatchResponse.action, EVENTS.MATCH_STARTED, 'Should receive match started event');
-
-    const matchId = hostMatchResponse.payload.match.id;
-    TestAssertions.assertNotNull(matchId, 'Match ID should be provided');
-
-    // End match with winner
-    const endMatchMessage = TestDataGenerator.generateWebSocketMessage(ACTIONS.END_MATCH, {
-      matchId,
-      winner: hostId
+    // Test role changes
+    // Player changes from player to spectator
+    const changeToSpectatorMessage = TestDataGenerator.generateWebSocketMessage(ACTIONS.CHANGE_ROLE, {
+      playerId,
+      newRole: PLAYER_ROLES.SPECTATOR
     });
+    await messageHandler.handleMessage(playerClient, changeToSpectatorMessage);
 
-    // Clear previous messages
+    // Verify all clients received role change event
+    await wait(10);
+    TestAssertions.assertTrue(hostClient.getSentMessages().length > 0, 'Host should receive role change');
+    TestAssertions.assertTrue(playerClient.getSentMessages().length > 0, 'Player should receive role change confirmation');
+    TestAssertions.assertTrue(spectatorClient.getSentMessages().length > 0, 'Spectator should receive role change');
+
+    // Player receives direct response confirming role change
+    const playerMessages = playerClient.getSentMessages();
+    const playerRoleResponse = JSON.parse(playerMessages[playerMessages.length - 1].data);
+    TestAssertions.assertEquals(playerRoleResponse.action, EVENTS.ROLE_CHANGED, 'Should receive role changed event');
+    TestAssertions.assertEquals(playerRoleResponse.payload.newRole, PLAYER_ROLES.SPECTATOR, 'New role should be spectator');
+
+    // Clear previous messages and change spectator to player
     for (const client of clients) {
       client.clearSentMessages();
     }
 
-    await messageHandler.handleMessage(hostClient, endMatchMessage);
+    const changeToPlayerMessage = TestDataGenerator.generateWebSocketMessage(ACTIONS.CHANGE_ROLE, {
+      playerId: spectatorId,
+      newRole: PLAYER_ROLES.PLAYER
+    });
+    await messageHandler.handleMessage(spectatorClient, changeToPlayerMessage);
 
-    // Verify all clients received match ended event
+    // Verify all clients received second role change event
     await wait(10);
     for (const client of clients) {
-      TestAssertions.assertTrue(client.getSentMessages().length > 0, 'All clients should receive match ended event');
+      TestAssertions.assertTrue(client.getSentMessages().length > 0, 'All clients should receive role change event');
       const message = JSON.parse(client.getSentMessages()[0].data);
       // Messages from channels have format: { channel: "lobby_code", payload: { action: "event", payload: {...} } }
       const response = message.payload;
-      TestAssertions.assertEquals(response.action, EVENTS.MATCH_ENDED, 'Should receive match ended event');
-      TestAssertions.assertEquals(response.payload.match.winner, hostId, 'Winner should be recorded correctly');
+      TestAssertions.assertEquals(response.action, EVENTS.ROLE_CHANGED, 'Should receive role changed event');
+      TestAssertions.assertEquals(response.payload.newRole, PLAYER_ROLES.PLAYER, 'New role should be player');
     }
   });
 

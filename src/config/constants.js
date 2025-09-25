@@ -26,7 +26,6 @@ const LOBBY_CONFIG = {
 
 // Player Roles
 const PLAYER_ROLES = {
-  HOST: 'host',
   PLAYER: 'player',
   SPECTATOR: 'spectator'
 };
@@ -34,18 +33,7 @@ const PLAYER_ROLES = {
 // Lobby Status
 const LOBBY_STATUS = {
   WAITING: 'waiting',          // Waiting for players
-  READY: 'ready',              // Ready to start (2 players)
-  IN_GAME: 'in_game',          // Match in progress
-  FINISHED: 'finished'         // Match completed
-};
-
-// Match Status
-const MATCH_STATUS = {
-  STARTING: 'starting',
-  IN_PROGRESS: 'in_progress',
-  PAUSED: 'paused',
-  FINISHED: 'finished',
-  CANCELLED: 'cancelled'
+  READY: 'ready'               // Ready to start (2 players) - matches handled on blockchain
 };
 
 // Message Actions
@@ -65,15 +53,12 @@ const ACTIONS = {
   LEAVE_LOBBY: 'leave_lobby',
   GET_LOBBY_INFO: 'get_lobby_info',
   KICK_PLAYER: 'kick_player',
+  CHANGE_ROLE: 'change_role',
 
   // Invitation Actions
   INVITE_PLAYER: 'invite_player',
   ACCEPT_INVITATION: 'accept_invitation',
   DECLINE_INVITATION: 'decline_invitation',
-
-  // Match Actions
-  START_MATCH: 'start_match',
-  END_MATCH: 'end_match',
 
   // Chat Actions
   LOBBY_CHAT: 'lobby_chat'
@@ -90,15 +75,12 @@ const EVENTS = {
   LOBBY_LEFT: 'lobby_left',
   LOBBY_INFO: 'lobby_info',
   PLAYER_KICKED: 'player_kicked',
+  ROLE_CHANGED: 'role_changed',
 
   // Invitation Events
   INVITATION_RECEIVED: 'invitation_received',
   INVITATION_ACCEPTED: 'invitation_accepted',
   INVITATION_DECLINED: 'invitation_declined',
-
-  // Match Events
-  MATCH_STARTED: 'match_started',
-  MATCH_ENDED: 'match_ended',
 
   // Chat Events
   LOBBY_CHAT_MESSAGE: 'lobby_chat_message',
@@ -126,7 +108,6 @@ module.exports = {
   LOBBY_CONFIG,
   PLAYER_ROLES,
   LOBBY_STATUS,
-  MATCH_STATUS,
   ACTIONS,
   EVENTS,
   ERROR_TYPES

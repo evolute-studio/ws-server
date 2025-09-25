@@ -71,6 +71,9 @@ class MessageHandler {
         case ACTIONS.KICK_PLAYER:
           return this.handleKickPlayer(client, payload);
 
+        case ACTIONS.CHANGE_ROLE:
+          return this.handleChangeRole(client, payload);
+
         // Invitation Actions
         case ACTIONS.INVITE_PLAYER:
           return this.handleInvitePlayer(client, payload);
@@ -80,13 +83,6 @@ class MessageHandler {
 
         case ACTIONS.DECLINE_INVITATION:
           return this.handleDeclineInvitation(client, payload);
-
-        // Match Actions
-        case ACTIONS.START_MATCH:
-          return this.handleStartMatch(client, payload);
-
-        case ACTIONS.END_MATCH:
-          return this.handleEndMatch(client, payload);
 
         // Chat Actions
         case ACTIONS.LOBBY_CHAT:
@@ -264,6 +260,24 @@ class MessageHandler {
     }
   }
 
+  handleChangeRole(client, payload) {
+    if (!payload || !payload.playerId || !payload.newRole) {
+      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Player ID and new role required');
+    }
+
+    const result = this.lobbyManager.changeRole(payload.playerId, payload.newRole);
+
+    if (result.success) {
+      this.channelManager.sendToClient(client, EVENTS.ROLE_CHANGED, {
+        newRole: result.newRole,
+        lobby: result.lobby
+      });
+      this.logger.info(`Player ${payload.playerId} changed role to ${result.newRole}`);
+    } else {
+      this.sendError(client, result.error, result.message);
+    }
+  }
+
   // Invitation Handlers
 
   handleInvitePlayer(client, payload) {
@@ -317,44 +331,6 @@ class MessageHandler {
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.INVITATION_DECLINED, { success: true });
       this.logger.info(`Invitation declined by ${payload.playerId}`);
-    } else {
-      this.sendError(client, result.error, result.message);
-    }
-  }
-
-  // Match Handlers
-
-  handleStartMatch(client, payload) {
-    if (!payload || !payload.hostId) {
-      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Host ID required');
-    }
-
-    const result = this.lobbyManager.startMatch(payload.hostId);
-
-    if (result.success) {
-      this.channelManager.sendToClient(client, EVENTS.MATCH_STARTED, {
-        match: result.match,
-        success: true
-      });
-      this.logger.info(`Match started by ${payload.hostId}: ${result.match.id}`);
-    } else {
-      this.sendError(client, result.error, result.message);
-    }
-  }
-
-  handleEndMatch(client, payload) {
-    if (!payload || !payload.matchId) {
-      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Match ID required');
-    }
-
-    const result = this.lobbyManager.endMatch(payload.matchId, payload.winner);
-
-    if (result.success) {
-      this.channelManager.sendToClient(client, EVENTS.MATCH_ENDED, {
-        match: result.match,
-        success: true
-      });
-      this.logger.info(`Match ended: ${payload.matchId}, winner: ${payload.winner || 'none'}`);
     } else {
       this.sendError(client, result.error, result.message);
     }
