@@ -9,7 +9,8 @@ const {
 const Lobby = require('../models/Lobby');
 
 /**
- * Manages lobby system: creation, joining, invitations, matches
+ * Manages lobby system: creation, joining, invitations
+ * Uses WebSocket connections as unique player identifiers for security
  */
 class LobbyManager {
   constructor(logger, playerManager, channelManager) {
@@ -18,8 +19,8 @@ class LobbyManager {
     this.channelManager = channelManager;
 
     this.lobbies = new Map(); // lobbyCode -> lobby object
-    this.playerLobbies = new Map(); // playerId -> lobbyCode
-    this.lobbyInvitations = new Map(); // targetPlayerId -> Set of invitations
+    this.clientLobbies = new Map(); // WebSocket -> lobbyCode
+    this.clientInvitations = new Map(); // WebSocket -> Set of invitations
     this.lobbyMatches = new Map(); // matchId -> match object
 
     // Start cleanup intervals
@@ -45,51 +46,49 @@ class LobbyManager {
 
   /**
    * Create new lobby
-   * @param {string} hostId - Host player ID
+   * @param {WebSocket} hostClient - Host WebSocket connection
    * @returns {Object} Result object with lobby info or error
    */
-  createLobby(hostId) {
+  createLobby(hostClient) {
     try {
-      // Validate host ID
-      if (!hostId || typeof hostId !== 'string' || hostId.trim() === '') {
+      // Validate host client
+      if (!hostClient) {
         return {
           success: false,
           error: ERROR_TYPES.INVALID_PAYLOAD,
-          message: 'Valid host ID is required'
+          message: 'Valid host client is required'
         };
       }
 
-      // Check if player is already in a lobby
-      if (this.playerLobbies.has(hostId)) {
+      // Check if client is already in a lobby
+      if (this.clientLobbies.has(hostClient)) {
         return {
           success: false,
           error: ERROR_TYPES.ALREADY_IN_LOBBY,
-          message: 'Player is already in a lobby'
+          message: 'Client is already in a lobby'
         };
       }
 
-      // Check if player is online
-      if (!this.playerManager.isOnline(hostId)) {
+      // Check if client is online
+      if (!this.playerManager.isOnline(hostClient)) {
         return {
           success: false,
           error: ERROR_TYPES.PLAYER_NOT_FOUND,
-          message: 'Host player is not online'
+          message: 'Host client is not online'
         };
       }
 
       const code = this.generateLobbyCode();
-      const lobby = new Lobby(code, hostId);
+      const lobby = new Lobby(code, hostClient, this.playerManager);
 
       this.lobbies.set(code, lobby);
-      this.playerLobbies.set(hostId, code);
+      this.clientLobbies.set(hostClient, code);
 
       // Subscribe host to lobby channel
-      const hostConnection = this.playerManager.getPlayerConnection(hostId);
-      if (hostConnection) {
-        this.channelManager.subscribe(hostConnection, `lobby_${code}`);
-      }
+      this.channelManager.subscribe(hostClient, `lobby_${code}`);
 
-      this.logger.info(`Lobby created: ${code} by ${hostId}`);
+      const hostAddress = this.playerManager.getPlayerData(hostClient)?.address || 'unknown';
+      this.logger.info(`Lobby created: ${code} by ${hostAddress}`);
 
       return {
         success: true,
@@ -109,19 +108,19 @@ class LobbyManager {
 
   /**
    * Join lobby by code
-   * @param {string} playerId - Player ID
+   * @param {WebSocket} client - WebSocket connection
    * @param {string} lobbyCode - Lobby code to join
    * @param {string} role - Role to join as ('player' or 'spectator')
    * @returns {Object} Result object
    */
-  joinLobby(playerId, lobbyCode, role = PLAYER_ROLES.PLAYER) {
+  joinLobby(client, lobbyCode, role = PLAYER_ROLES.PLAYER) {
     try {
-      // Validate player ID
-      if (!playerId || typeof playerId !== 'string' || playerId.trim() === '') {
+      // Validate client
+      if (!client) {
         return {
           success: false,
           error: ERROR_TYPES.INVALID_PAYLOAD,
-          message: 'Valid player ID is required'
+          message: 'Valid client is required'
         };
       }
 
@@ -134,21 +133,21 @@ class LobbyManager {
         };
       }
 
-      // Check if player is already in a lobby
-      if (this.playerLobbies.has(playerId)) {
+      // Check if client is already in a lobby
+      if (this.clientLobbies.has(client)) {
         return {
           success: false,
           error: ERROR_TYPES.ALREADY_IN_LOBBY,
-          message: 'Player is already in a lobby'
+          message: 'Client is already in a lobby'
         };
       }
 
-      // Check if player is online
-      if (!this.playerManager.isOnline(playerId)) {
+      // Check if client is online
+      if (!this.playerManager.isOnline(client)) {
         return {
           success: false,
           error: ERROR_TYPES.PLAYER_NOT_FOUND,
-          message: 'Player is not online'
+          message: 'Client is not online'
         };
       }
 
@@ -179,31 +178,29 @@ class LobbyManager {
         }
       }
 
-      // Add player using Lobby class method
-      if (!lobby.addPlayer(playerId, role)) {
+      // Add client using Lobby class method
+      if (!lobby.addPlayer(client, role)) {
         return {
           success: false,
           error: ERROR_TYPES.LOBBY_FULL,
-          message: 'Failed to add player to lobby'
+          message: 'Failed to add client to lobby'
         };
       }
 
-      this.playerLobbies.set(playerId, lobbyCode);
+      this.clientLobbies.set(client, lobbyCode);
 
-      // Subscribe player to lobby channel
-      const playerConnection = this.playerManager.getPlayerConnection(playerId);
-      if (playerConnection) {
-        this.channelManager.subscribe(playerConnection, `lobby_${lobbyCode}`);
-      }
+      // Subscribe client to lobby channel
+      this.channelManager.subscribe(client, `lobby_${lobbyCode}`);
 
       // Notify all lobby members
+      const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
       this.broadcastToLobby(lobbyCode, EVENTS.LOBBY_JOINED, {
-        playerId,
+        playerId: clientAddress,
         role,
         lobby: lobby.toClientData()
       });
 
-      this.logger.info(`Player ${playerId} joined lobby ${lobbyCode} as ${role}`);
+      this.logger.info(`Client ${clientAddress} joined lobby ${lobbyCode} as ${role}`);
 
       return {
         success: true,
@@ -224,24 +221,24 @@ class LobbyManager {
 
   /**
    * Leave lobby
-   * @param {string} playerId - Player ID
+   * @param {WebSocket} client - WebSocket connection
    * @returns {Object} Result object
    */
-  leaveLobby(playerId) {
+  leaveLobby(client) {
     try {
-      const lobbyCode = this.playerLobbies.get(playerId);
+      const lobbyCode = this.clientLobbies.get(client);
       if (!lobbyCode) {
         return {
           success: false,
           error: ERROR_TYPES.LOBBY_NOT_FOUND,
-          message: 'Player is not in any lobby'
+          message: 'Client is not in any lobby'
         };
       }
 
       const lobby = this.lobbies.get(lobbyCode);
       if (!lobby) {
-        // Clean up orphaned player mapping
-        this.playerLobbies.delete(playerId);
+        // Clean up orphaned client mapping
+        this.clientLobbies.delete(client);
         return {
           success: false,
           error: ERROR_TYPES.LOBBY_NOT_FOUND,
@@ -249,31 +246,28 @@ class LobbyManager {
         };
       }
 
-      // Remove player from lobby
-      const removeResult = lobby.removePlayer(playerId);
+      // Remove client from lobby
+      const removeResult = lobby.removePlayer(client);
       if (!removeResult.success) {
         return {
           success: false,
           error: ERROR_TYPES.PLAYER_NOT_FOUND,
-          message: 'Player not found in lobby'
+          message: 'Client not found in lobby'
         };
       }
-      // const wasPlayer = removeResult.role === PLAYER_ROLES.PLAYER;  // Not used here
 
-      this.playerLobbies.delete(playerId);
+      this.clientLobbies.delete(client);
 
       // Unsubscribe from lobby channel
-      const playerConnection = this.playerManager.getPlayerConnection(playerId);
-      if (playerConnection) {
-        this.channelManager.unsubscribe(playerConnection, `lobby_${lobbyCode}`);
-      }
+      this.channelManager.unsubscribe(client, `lobby_${lobbyCode}`);
 
       // Handle host leaving
-      if (lobby.isHost(playerId)) {
+      if (lobby.isHost(client)) {
         if (lobby.players.length > 0) {
           // Transfer host to first remaining player
-          lobby.host = lobby.players[0];
-          this.logger.info(`Host transferred to ${lobby.host} in lobby ${lobbyCode}`);
+          lobby.transferHost(lobby.players[0]);
+          const newHostAddress = lobby.getClientAddress(lobby.host);
+          this.logger.info(`Host transferred to ${newHostAddress} in lobby ${lobbyCode}`);
         } else {
           // No players left, close lobby
           this.closeLobby(lobbyCode);
@@ -285,24 +279,20 @@ class LobbyManager {
         }
       }
 
-      // Update lobby status
-      if (lobby.players.length < LOBBY_CONFIG.MAX_PLAYERS && lobby.status === LOBBY_STATUS.READY) {
-        lobby.status = LOBBY_STATUS.WAITING;
-      }
-
       // Notify remaining lobby members
+      const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
       this.broadcastToLobby(lobbyCode, EVENTS.LOBBY_LEFT, {
-        playerId,
+        playerId: clientAddress,
         role: removeResult.role,
-        lobby: this.sanitizeLobbyForClient(lobby)
+        lobby: lobby.toClientData()
       });
 
-      this.logger.info(`Player ${playerId} left lobby ${lobbyCode}`);
+      this.logger.info(`Client ${clientAddress} left lobby`);
 
       return {
         success: true,
         event: EVENTS.LOBBY_LEFT,
-        lobby: this.sanitizeLobbyForClient(lobby)
+        lobby: lobby.toClientData()
       };
 
     } catch (error) {
@@ -318,10 +308,10 @@ class LobbyManager {
   /**
    * Get lobby information
    * @param {string} lobbyCode - Lobby code
-   * @param {string} requesterId - Player requesting the info
+   * @param {WebSocket} requesterClient - Client requesting the info
    * @returns {Object} Result object with lobby info
    */
-  getLobbyInfo(lobbyCode, requesterId = null) {
+  getLobbyInfo(lobbyCode, requesterClient = null) {
     const lobby = this.lobbies.get(lobbyCode);
     if (!lobby) {
       return {
@@ -333,21 +323,21 @@ class LobbyManager {
 
     return {
       success: true,
-      lobby: this.sanitizeLobbyForClient(lobby),
-      isHost: requesterId === lobby.host,
-      playerRole: this.getPlayerRole(requesterId, lobby)
+      lobby: lobby.toClientData(),
+      isHost: requesterClient ? lobby.isHost(requesterClient) : false,
+      playerRole: requesterClient ? lobby.getPlayerRole(requesterClient) : null
     };
   }
 
   /**
-   * Send invitation to player
-   * @param {string} fromPlayerId - Inviting player ID
-   * @param {string} targetPlayerId - Target player ID
+   * Send invitation to player (by address)
+   * @param {WebSocket} fromClient - Inviting client
+   * @param {string} targetPlayerAddress - Target player address
    * @returns {Object} Result object
    */
-  invitePlayer(fromPlayerId, targetPlayerId) {
+  invitePlayer(fromClient, targetPlayerAddress) {
     try {
-      const lobbyCode = this.playerLobbies.get(fromPlayerId);
+      const lobbyCode = this.clientLobbies.get(fromClient);
       if (!lobbyCode) {
         return {
           success: false,
@@ -365,8 +355,9 @@ class LobbyManager {
         };
       }
 
-      // Check if target player is online
-      if (!this.playerManager.isOnline(targetPlayerId)) {
+      // Find target client by address
+      const targetClient = this.playerManager.getClientByAddress(targetPlayerAddress);
+      if (!targetClient) {
         return {
           success: false,
           error: ERROR_TYPES.PLAYER_NOT_FOUND,
@@ -375,7 +366,7 @@ class LobbyManager {
       }
 
       // Check if target is already in a lobby
-      if (this.playerLobbies.has(targetPlayerId)) {
+      if (this.clientLobbies.has(targetClient)) {
         return {
           success: false,
           error: ERROR_TYPES.ALREADY_IN_LOBBY,
@@ -383,31 +374,29 @@ class LobbyManager {
         };
       }
 
+      const fromPlayerAddress = this.playerManager.getPlayerData(fromClient)?.address || 'unknown';
       const invitation = {
-        fromPlayerId,
-        fromPlayerName: fromPlayerId, // Could be enhanced with actual names
+        fromPlayerId: fromPlayerAddress,
+        fromPlayerName: fromPlayerAddress, // Could be enhanced with actual names
         lobbyCode,
         timestamp: Date.now()
       };
 
       // Add invitation
-      if (!this.lobbyInvitations.has(targetPlayerId)) {
-        this.lobbyInvitations.set(targetPlayerId, new Set());
+      if (!this.clientInvitations.has(targetClient)) {
+        this.clientInvitations.set(targetClient, new Set());
       }
-      this.lobbyInvitations.get(targetPlayerId).add(invitation);
+      this.clientInvitations.get(targetClient).add(invitation);
 
       // Send invitation to target player
-      const targetConnection = this.playerManager.getPlayerConnection(targetPlayerId);
-      if (targetConnection) {
-        this.channelManager.sendToClient(targetConnection, EVENTS.INVITATION_RECEIVED, {
-          invitation: {
-            ...invitation,
-            lobbyInfo: lobby.toClientData()
-          }
-        });
-      }
+      this.channelManager.sendToClient(targetClient, EVENTS.INVITATION_RECEIVED, {
+        invitation: {
+          ...invitation,
+          lobbyInfo: lobby.toClientData()
+        }
+      });
 
-      this.logger.info(`Invitation sent from ${fromPlayerId} to ${targetPlayerId} for lobby ${lobbyCode}`);
+      this.logger.info(`Invitation sent from ${fromPlayerAddress} to ${targetPlayerAddress} for lobby ${lobbyCode}`);
 
       return {
         success: true,
@@ -426,14 +415,14 @@ class LobbyManager {
 
   /**
    * Accept invitation
-   * @param {string} playerId - Player accepting invitation
-   * @param {string} fromPlayerId - Original inviter
+   * @param {WebSocket} client - Client accepting invitation
+   * @param {string} fromPlayerAddress - Original inviter address
    * @param {string} lobbyCode - Lobby code
    * @returns {Object} Result object
    */
-  acceptInvitation(playerId, fromPlayerId, lobbyCode) {
+  acceptInvitation(client, fromPlayerAddress, lobbyCode) {
     try {
-      const invitations = this.lobbyInvitations.get(playerId);
+      const invitations = this.clientInvitations.get(client);
       if (!invitations) {
         return {
           success: false,
@@ -445,7 +434,7 @@ class LobbyManager {
       // Find the specific invitation
       let invitation = null;
       for (const inv of invitations) {
-        if (inv.fromPlayerId === fromPlayerId && inv.lobbyCode === lobbyCode) {
+        if (inv.fromPlayerId === fromPlayerAddress && inv.lobbyCode === lobbyCode) {
           invitation = inv;
           break;
         }
@@ -462,18 +451,19 @@ class LobbyManager {
       // Remove the invitation
       invitations.delete(invitation);
       if (invitations.size === 0) {
-        this.lobbyInvitations.delete(playerId);
+        this.clientInvitations.delete(client);
       }
 
       // Join the lobby
-      const joinResult = this.joinLobby(playerId, lobbyCode, PLAYER_ROLES.PLAYER);
+      const joinResult = this.joinLobby(client, lobbyCode, PLAYER_ROLES.PLAYER);
 
       if (joinResult.success) {
         // Notify inviter
-        const inviterConnection = this.playerManager.getPlayerConnection(fromPlayerId);
-        if (inviterConnection) {
-          this.channelManager.sendToClient(inviterConnection, EVENTS.INVITATION_ACCEPTED, {
-            playerId,
+        const inviterClient = this.playerManager.getClientByAddress(fromPlayerAddress);
+        if (inviterClient) {
+          const accepterAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+          this.channelManager.sendToClient(inviterClient, EVENTS.INVITATION_ACCEPTED, {
+            playerId: accepterAddress,
             lobbyCode
           });
         }
@@ -493,14 +483,14 @@ class LobbyManager {
 
   /**
    * Decline invitation
-   * @param {string} playerId - Player declining invitation
-   * @param {string} fromPlayerId - Original inviter
+   * @param {WebSocket} client - Client declining invitation
+   * @param {string} fromPlayerAddress - Original inviter address
    * @param {string} lobbyCode - Lobby code
    * @returns {Object} Result object
    */
-  declineInvitation(playerId, fromPlayerId, lobbyCode) {
+  declineInvitation(client, fromPlayerAddress, lobbyCode) {
     try {
-      const invitations = this.lobbyInvitations.get(playerId);
+      const invitations = this.clientInvitations.get(client);
       if (!invitations) {
         return {
           success: false,
@@ -512,7 +502,7 @@ class LobbyManager {
       // Find and remove the specific invitation
       let found = false;
       for (const inv of invitations) {
-        if (inv.fromPlayerId === fromPlayerId && inv.lobbyCode === lobbyCode) {
+        if (inv.fromPlayerId === fromPlayerAddress && inv.lobbyCode === lobbyCode) {
           invitations.delete(inv);
           found = true;
           break;
@@ -528,19 +518,21 @@ class LobbyManager {
       }
 
       if (invitations.size === 0) {
-        this.lobbyInvitations.delete(playerId);
+        this.clientInvitations.delete(client);
       }
 
       // Notify inviter
-      const inviterConnection = this.playerManager.getPlayerConnection(fromPlayerId);
-      if (inviterConnection) {
-        this.channelManager.sendToClient(inviterConnection, EVENTS.INVITATION_DECLINED, {
-          playerId,
+      const inviterClient = this.playerManager.getClientByAddress(fromPlayerAddress);
+      if (inviterClient) {
+        const declinerAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+        this.channelManager.sendToClient(inviterClient, EVENTS.INVITATION_DECLINED, {
+          playerId: declinerAddress,
           lobbyCode
         });
       }
 
-      this.logger.info(`Invitation declined by ${playerId} from ${fromPlayerId} for lobby ${lobbyCode}`);
+      const declinerAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+      this.logger.info(`Invitation declined by ${declinerAddress} from ${fromPlayerAddress} for lobby ${lobbyCode}`);
 
       return {
         success: true,
@@ -559,13 +551,13 @@ class LobbyManager {
 
   /**
    * Kick player from lobby (host only)
-   * @param {string} hostId - Host player ID
-   * @param {string} targetPlayerId - Player to kick
+   * @param {WebSocket} hostClient - Host client
+   * @param {string} targetPlayerAddress - Player address to kick
    * @returns {Object} Result object
    */
-  kickPlayer(hostId, targetPlayerId) {
+  kickPlayer(hostClient, targetPlayerAddress) {
     try {
-      const lobbyCode = this.playerLobbies.get(hostId);
+      const lobbyCode = this.clientLobbies.get(hostClient);
       if (!lobbyCode) {
         return {
           success: false,
@@ -575,7 +567,7 @@ class LobbyManager {
       }
 
       const lobby = this.lobbies.get(lobbyCode);
-      if (!lobby || !lobby.isHost(hostId)) {
+      if (!lobby || !lobby.isHost(hostClient)) {
         return {
           success: false,
           error: ERROR_TYPES.PERMISSION_DENIED,
@@ -583,7 +575,9 @@ class LobbyManager {
         };
       }
 
-      if (!lobby.hasMember(targetPlayerId)) {
+      // Find target client by address
+      const targetClient = this.playerManager.getClientByAddress(targetPlayerAddress);
+      if (!targetClient || !lobby.hasMember(targetClient)) {
         return {
           success: false,
           error: ERROR_TYPES.PLAYER_NOT_FOUND,
@@ -591,7 +585,8 @@ class LobbyManager {
         };
       }
 
-      if (targetPlayerId === hostId) {
+      const hostAddress = this.playerManager.getPlayerData(hostClient)?.address || 'unknown';
+      if (targetPlayerAddress === hostAddress) {
         return {
           success: false,
           error: ERROR_TYPES.PERMISSION_DENIED,
@@ -600,28 +595,24 @@ class LobbyManager {
       }
 
       // Remove player
-      lobby.removePlayer(targetPlayerId);
-
-      this.playerLobbies.delete(targetPlayerId);
+      lobby.removePlayer(targetClient);
+      this.clientLobbies.delete(targetClient);
 
       // Unsubscribe kicked player
-      const targetConnection = this.playerManager.getPlayerConnection(targetPlayerId);
-      if (targetConnection) {
-        this.channelManager.unsubscribe(targetConnection, `lobby_${lobbyCode}`);
-        this.channelManager.sendToClient(targetConnection, EVENTS.PLAYER_KICKED, {
-          lobbyCode,
-          kickedBy: hostId
-        });
-      }
+      this.channelManager.unsubscribe(targetClient, `lobby_${lobbyCode}`);
+      this.channelManager.sendToClient(targetClient, EVENTS.PLAYER_KICKED, {
+        lobbyCode,
+        kickedBy: hostAddress
+      });
 
       // Notify remaining lobby members
       this.broadcastToLobby(lobbyCode, EVENTS.PLAYER_KICKED, {
-        kickedPlayerId: targetPlayerId,
-        kickedBy: hostId,
+        kickedPlayerId: targetPlayerAddress,
+        kickedBy: hostAddress,
         lobby: lobby.toClientData()
       });
 
-      this.logger.info(`Player ${targetPlayerId} kicked from lobby ${lobbyCode} by ${hostId}`);
+      this.logger.info(`Player ${targetPlayerAddress} kicked from lobby ${lobbyCode} by ${hostAddress}`);
 
       return {
         success: true,
@@ -640,11 +631,11 @@ class LobbyManager {
 
   /**
    * Change player role between player and spectator
-   * @param {string} playerId - Player ID requesting role change
+   * @param {WebSocket} client - Client requesting role change
    * @param {string} newRole - New role (player or spectator)
    * @returns {Object} Result object
    */
-  changeRole(playerId, newRole) {
+  changeRole(client, newRole) {
     try {
       // Validate role (only player and spectator are allowed)
       if (newRole !== PLAYER_ROLES.PLAYER && newRole !== PLAYER_ROLES.SPECTATOR) {
@@ -655,12 +646,12 @@ class LobbyManager {
         };
       }
 
-      const lobbyCode = this.playerLobbies.get(playerId);
+      const lobbyCode = this.clientLobbies.get(client);
       if (!lobbyCode) {
         return {
           success: false,
           error: ERROR_TYPES.LOBBY_NOT_FOUND,
-          message: 'Player is not in any lobby'
+          message: 'Client is not in any lobby'
         };
       }
 
@@ -674,7 +665,7 @@ class LobbyManager {
       }
 
       // Use Lobby class method to change role
-      const changeResult = lobby.changePlayerRole(playerId, newRole);
+      const changeResult = lobby.changePlayerRole(client, newRole);
       if (!changeResult.success) {
         return {
           success: false,
@@ -684,13 +675,14 @@ class LobbyManager {
       }
 
       // Broadcast role change to all lobby members
+      const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
       this.broadcastToLobby(lobbyCode, EVENTS.ROLE_CHANGED, {
-        playerId,
+        playerId: clientAddress,
         newRole: changeResult.newRole,
         lobby: lobby.toClientData()
       });
 
-      this.logger.info(`Player ${playerId} changed role to ${changeResult.newRole} in lobby ${lobbyCode}`);
+      this.logger.info(`Client ${clientAddress} changed role to ${changeResult.newRole} in lobby ${lobbyCode}`);
 
       return {
         success: true,
@@ -711,18 +703,18 @@ class LobbyManager {
 
   /**
    * Send chat message to lobby
-   * @param {string} playerId - Sender player ID
+   * @param {WebSocket} client - Sender client
    * @param {string} message - Chat message
    * @returns {Object} Result object
    */
-  sendLobbyChat(playerId, message) {
+  sendLobbyChat(client, message) {
     try {
-      const lobbyCode = this.playerLobbies.get(playerId);
+      const lobbyCode = this.clientLobbies.get(client);
       if (!lobbyCode) {
         return {
           success: false,
           error: ERROR_TYPES.LOBBY_NOT_FOUND,
-          message: 'Player is not in any lobby'
+          message: 'Client is not in any lobby'
         };
       }
 
@@ -736,7 +728,7 @@ class LobbyManager {
       }
 
       // Add chat message using Lobby class method
-      const chatMessage = lobby.addChatMessage(playerId, message);
+      const chatMessage = lobby.addChatMessage(client, message);
 
       // Broadcast to all lobby members
       this.broadcastToLobby(lobbyCode, EVENTS.LOBBY_CHAT_MESSAGE, chatMessage);
@@ -755,7 +747,7 @@ class LobbyManager {
       };
     }
   }
-  
+
   /**
    * Close lobby and clean up
    * @param {string} lobbyCode - Lobby code
@@ -764,16 +756,13 @@ class LobbyManager {
     const lobby = this.lobbies.get(lobbyCode);
     if (!lobby) return;
 
-    // Remove all players from lobby mapping
+    // Remove all clients from lobby mapping
     const allMembers = [...lobby.players, ...lobby.spectators];
-    for (const playerId of allMembers) {
-      this.playerLobbies.delete(playerId);
+    for (const client of allMembers) {
+      this.clientLobbies.delete(client);
 
       // Unsubscribe from lobby channel
-      const connection = this.playerManager.getPlayerConnection(playerId);
-      if (connection) {
-        this.channelManager.unsubscribe(connection, `lobby_${lobbyCode}`);
-      }
+      this.channelManager.unsubscribe(client, `lobby_${lobbyCode}`);
     }
 
     // Clean up match if exists
@@ -800,12 +789,12 @@ class LobbyManager {
 
   /**
    * Get player role in lobby (deprecated - use lobby.getPlayerRole instead)
-   * @param {string} playerId - Player ID
+   * @param {WebSocket} client - WebSocket connection
    * @param {Object} lobby - Lobby object
    * @returns {string} Player role
    */
-  getPlayerRole(playerId, lobby) {
-    return lobby.getPlayerRole(playerId);
+  getPlayerRole(client, lobby) {
+    return lobby.getPlayerRole(client);
   }
 
   /**
@@ -832,7 +821,7 @@ class LobbyManager {
     const now = Date.now();
     let cleanedCount = 0;
 
-    for (const [playerId, invitations] of this.lobbyInvitations.entries()) {
+    for (const [client, invitations] of this.clientInvitations.entries()) {
       const validInvitations = new Set();
 
       for (const invitation of invitations) {
@@ -844,9 +833,9 @@ class LobbyManager {
       }
 
       if (validInvitations.size === 0) {
-        this.lobbyInvitations.delete(playerId);
+        this.clientInvitations.delete(client);
       } else {
-        this.lobbyInvitations.set(playerId, validInvitations);
+        this.clientInvitations.set(client, validInvitations);
       }
     }
 
@@ -876,6 +865,30 @@ class LobbyManager {
   }
 
   /**
+   * Handle client disconnect - remove from all lobbies and clean up
+   * @param {WebSocket} client - Disconnecting client
+   */
+  handleClientDisconnect(client) {
+    try {
+      // Find and remove client from any lobby they're in
+      const lobbyCode = this.clientLobbies.get(client);
+      if (lobbyCode) {
+        this.leaveLobby(client);
+      }
+
+      // Remove any invitations for this client
+      this.clientInvitations.delete(client);
+
+      const clientData = this.playerManager.getPlayerData(client);
+      const address = clientData ? clientData.address : 'unknown';
+      this.logger.info(`Client ${address} disconnected and cleaned up from lobbies`);
+
+    } catch (error) {
+      this.logger.error('Error during client disconnect cleanup:', error);
+    }
+  }
+
+  /**
    * Start cleanup intervals
    */
   startCleanupIntervals() {
@@ -898,8 +911,8 @@ class LobbyManager {
    */
   getStats() {
     const totalLobbies = this.lobbies.size;
-    const totalPlayers = this.playerLobbies.size;
-    const totalInvitations = Array.from(this.lobbyInvitations.values())
+    const totalClients = this.clientLobbies.size;
+    const totalInvitations = Array.from(this.clientInvitations.values())
       .reduce((sum, invitations) => sum + invitations.size, 0);
     const totalMatches = this.lobbyMatches.size;
 
@@ -914,11 +927,11 @@ class LobbyManager {
 
     return {
       totalLobbies,
-      totalPlayers,
+      totalPlayers: totalClients,
       totalInvitations,
       totalMatches,
       lobbyStatuses,
-      avgPlayersPerLobby: totalLobbies > 0 ? (totalPlayers / totalLobbies).toFixed(2) : 0
+      avgPlayersPerLobby: totalLobbies > 0 ? (totalClients / totalLobbies).toFixed(2) : 0
     };
   }
 }

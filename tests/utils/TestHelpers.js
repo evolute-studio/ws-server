@@ -15,6 +15,12 @@ class TestAssertions {
     }
   }
 
+  static assertNotEquals(actual, notExpected, message = '') {
+    if (actual === notExpected) {
+      throw new Error(`Assertion failed${message ? ': ' + message : ''}\nExpected NOT: ${notExpected}\nActual: ${actual}`);
+    }
+  }
+
   static assertTrue(condition, message = '') {
     if (!condition) {
       throw new Error(`Assertion failed${message ? ': ' + message : ''}\nExpected: true\nActual: false`);
@@ -301,43 +307,49 @@ function wait(ms) {
 }
 
 /**
- * Create test player with ping
+ * Create test player with WebSocket connection and address
  * @param {PlayerManager} playerManager - Player manager instance
- * @param {string} playerId - Player ID
- * @param {MockWebSocket} connection - Mock connection
- * @returns {string} Player ID
+ * @param {string} address - Player address (optional, auto-generated if not provided)
+ * @param {MockWebSocket} connection - Mock connection (optional, auto-generated if not provided)
+ * @returns {MockWebSocket} WebSocket connection
  */
-function createTestPlayer(playerManager, playerId = null, connection = null) {
-  const id = playerId || TestDataGenerator.generatePlayerId();
-  playerManager.updatePing(id, connection);
-  return id;
+function createTestPlayer(playerManager, address = null, connection = null) {
+  const client = connection || new (require('./MockWebSocket')).MockWebSocket();
+  const playerAddress = address || TestDataGenerator.generatePlayerId();
+  playerManager.updatePing(client, playerAddress);
+  return client;
 }
 
 /**
  * Create test lobby with players
  * @param {LobbyManager} lobbyManager - Lobby manager instance
  * @param {PlayerManager} playerManager - Player manager instance
- * @param {string} hostId - Host player ID
- * @param {Array} additionalPlayers - Additional player IDs to add
- * @returns {Object} Lobby creation result
+ * @param {MockWebSocket} hostClient - Host WebSocket connection (optional)
+ * @param {Array} additionalPlayers - Additional player addresses to add
+ * @returns {Object} Lobby creation result with host client
  */
-async function createTestLobby(lobbyManager, playerManager, hostId = null, additionalPlayers = []) {
-  const host = hostId || createTestPlayer(playerManager);
+async function createTestLobby(lobbyManager, playerManager, hostClient = null, additionalPlayers = []) {
+  const host = hostClient || createTestPlayer(playerManager);
   const createResult = lobbyManager.createLobby(host);
 
   if (!createResult.success) {
     throw new Error(`Failed to create test lobby: ${createResult.message}`);
   }
 
-  // Add additional players
-  for (const playerId of additionalPlayers) {
-    const joinResult = lobbyManager.joinLobby(playerId, createResult.lobby.code);
+  // Add additional players by address
+  for (const playerAddress of additionalPlayers) {
+    const client = createTestPlayer(playerManager, playerAddress);
+    const joinResult = lobbyManager.joinLobby(client, createResult.lobby.code);
     if (!joinResult.success) {
-      throw new Error(`Failed to add player ${playerId} to test lobby: ${joinResult.message}`);
+      throw new Error(`Failed to add player ${playerAddress} to test lobby: ${joinResult.message}`);
     }
   }
 
-  return createResult;
+  // Return result with host client reference
+  return {
+    ...createResult,
+    hostClient: host
+  };
 }
 
 module.exports = {

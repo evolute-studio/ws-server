@@ -142,7 +142,13 @@ class MessageHandler {
         return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Player Address required in ping');
       }
 
-      this.playerManager.updatePing(pingData.Address, client);
+      // Check if client is trying to change address
+      const existingData = this.playerManager.getPlayerData(client);
+      if (existingData && existingData.address !== pingData.Address) {
+        return this.sendError(client, ERROR_TYPES.INVALID_ACTION, 'Address cannot be changed after initial connection');
+      }
+
+      this.playerManager.updatePing(client, pingData.Address);
       this.logger.debug(`Ping received from player ${pingData.Address}`);
 
     } catch (error) {
@@ -173,44 +179,40 @@ class MessageHandler {
   // Lobby Management Handlers
 
   handleCreateLobby(client, payload) {
-    if (!payload || !payload.hostId) {
-      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Host ID required');
-    }
-
-    const result = this.lobbyManager.createLobby(payload.hostId);
+    // No need to validate hostId from payload - we use client connection as ID
+    const result = this.lobbyManager.createLobby(client);
 
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.LOBBY_CREATED, result.lobby);
-      this.logger.info(`Lobby created by ${payload.hostId}: ${result.lobby.code}`);
+      const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+      this.logger.info(`Lobby created by ${clientAddress}: ${result.lobby.code}`);
     } else {
       this.sendError(client, result.error, result.message);
     }
   }
 
   handleJoinLobby(client, payload) {
-    if (!payload || !payload.playerId || !payload.lobbyCode) {
-      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Player ID and lobby code required');
+    if (!payload || !payload.lobbyCode) {
+      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Lobby code required');
     }
 
-    const result = this.lobbyManager.joinLobby(payload.playerId, payload.lobbyCode, payload.role);
+    const result = this.lobbyManager.joinLobby(client, payload.lobbyCode, payload.role);
 
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.LOBBY_JOINED, {
         lobby: result.lobby,
         role: result.role
       });
-      this.logger.info(`Player ${payload.playerId} joined lobby ${payload.lobbyCode}`);
+      const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+      this.logger.info(`Client ${clientAddress} joined lobby ${payload.lobbyCode}`);
     } else {
       this.sendError(client, result.error, result.message);
     }
   }
 
   handleLeaveLobby(client, payload) {
-    if (!payload || !payload.playerId) {
-      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Player ID required');
-    }
-
-    const result = this.lobbyManager.leaveLobby(payload.playerId);
+    // No need to validate playerId from payload - we use client connection as ID
+    const result = this.lobbyManager.leaveLobby(client);
 
     if (result.success) {
       const response = { success: true };
@@ -221,7 +223,8 @@ class MessageHandler {
       }
 
       this.channelManager.sendToClient(client, EVENTS.LOBBY_LEFT, response);
-      this.logger.info(`Player ${payload.playerId} left lobby`);
+      const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+      this.logger.info(`Client ${clientAddress} left lobby`);
     } else {
       this.sendError(client, result.error, result.message);
     }
@@ -232,7 +235,7 @@ class MessageHandler {
       return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Lobby code required');
     }
 
-    const result = this.lobbyManager.getLobbyInfo(payload.lobbyCode, payload.requesterId);
+    const result = this.lobbyManager.getLobbyInfo(payload.lobbyCode, client);
 
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.LOBBY_INFO, {
@@ -246,33 +249,35 @@ class MessageHandler {
   }
 
   handleKickPlayer(client, payload) {
-    if (!payload || !payload.hostId || !payload.targetPlayerId) {
-      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Host ID and target player ID required');
+    if (!payload || !payload.targetPlayerId) {
+      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Target player ID (address) required');
     }
 
-    const result = this.lobbyManager.kickPlayer(payload.hostId, payload.targetPlayerId);
+    const result = this.lobbyManager.kickPlayer(client, payload.targetPlayerId);
 
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.PLAYER_KICKED, { success: true });
-      this.logger.info(`Player ${payload.targetPlayerId} kicked by ${payload.hostId}`);
+      const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+      this.logger.info(`Player ${payload.targetPlayerId} kicked by ${clientAddress}`);
     } else {
       this.sendError(client, result.error, result.message);
     }
   }
 
   handleChangeRole(client, payload) {
-    if (!payload || !payload.playerId || !payload.newRole) {
-      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Player ID and new role required');
+    if (!payload || !payload.newRole) {
+      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'New role required');
     }
 
-    const result = this.lobbyManager.changeRole(payload.playerId, payload.newRole);
+    const result = this.lobbyManager.changeRole(client, payload.newRole);
 
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.ROLE_CHANGED, {
         newRole: result.newRole,
         lobby: result.lobby
       });
-      this.logger.info(`Player ${payload.playerId} changed role to ${result.newRole}`);
+      const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+      this.logger.info(`Client ${clientAddress} changed role to ${result.newRole}`);
     } else {
       this.sendError(client, result.error, result.message);
     }
@@ -281,27 +286,28 @@ class MessageHandler {
   // Invitation Handlers
 
   handleInvitePlayer(client, payload) {
-    if (!payload || !payload.fromPlayerId || !payload.targetPlayerId) {
-      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'From and target player IDs required');
+    if (!payload || !payload.targetPlayerId) {
+      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Target player ID (address) required');
     }
 
-    const result = this.lobbyManager.invitePlayer(payload.fromPlayerId, payload.targetPlayerId);
+    const result = this.lobbyManager.invitePlayer(client, payload.targetPlayerId);
 
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.INVITATION_RECEIVED, { success: true });
-      this.logger.info(`Invitation sent from ${payload.fromPlayerId} to ${payload.targetPlayerId}`);
+      const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+      this.logger.info(`Invitation sent from ${clientAddress} to ${payload.targetPlayerId}`);
     } else {
       this.sendError(client, result.error, result.message);
     }
   }
 
   handleAcceptInvitation(client, payload) {
-    if (!payload || !payload.playerId || !payload.fromPlayerId || !payload.lobbyCode) {
-      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Player ID, from player ID, and lobby code required');
+    if (!payload || !payload.fromPlayerId || !payload.lobbyCode) {
+      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'From player ID (address) and lobby code required');
     }
 
     const result = this.lobbyManager.acceptInvitation(
-      payload.playerId,
+      client,
       payload.fromPlayerId,
       payload.lobbyCode
     );
@@ -311,26 +317,28 @@ class MessageHandler {
         lobby: result.lobby,
         role: result.role
       });
-      this.logger.info(`Invitation accepted by ${payload.playerId}`);
+      const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+      this.logger.info(`Invitation accepted by ${clientAddress}`);
     } else {
       this.sendError(client, result.error, result.message);
     }
   }
 
   handleDeclineInvitation(client, payload) {
-    if (!payload || !payload.playerId || !payload.fromPlayerId || !payload.lobbyCode) {
-      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Player ID, from player ID, and lobby code required');
+    if (!payload || !payload.fromPlayerId || !payload.lobbyCode) {
+      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'From player ID (address) and lobby code required');
     }
 
     const result = this.lobbyManager.declineInvitation(
-      payload.playerId,
+      client,
       payload.fromPlayerId,
       payload.lobbyCode
     );
 
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.INVITATION_DECLINED, { success: true });
-      this.logger.info(`Invitation declined by ${payload.playerId}`);
+      const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+      this.logger.info(`Invitation declined by ${clientAddress}`);
     } else {
       this.sendError(client, result.error, result.message);
     }
@@ -339,15 +347,16 @@ class MessageHandler {
   // Chat Handlers
 
   handleLobbyChat(client, payload) {
-    if (!payload || !payload.playerId || !payload.message) {
-      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Player ID and message required');
+    if (!payload || !payload.message) {
+      return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Message required');
     }
 
-    const result = this.lobbyManager.sendLobbyChat(payload.playerId, payload.message);
+    const result = this.lobbyManager.sendLobbyChat(client, payload.message);
 
     if (result.success) {
       // Chat message is broadcast by LobbyManager, no need to send individual response
-      this.logger.debug(`Chat message sent by ${payload.playerId}`);
+      const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+      this.logger.debug(`Chat message sent by ${clientAddress}`);
     } else {
       this.sendError(client, result.error, result.message);
     }
@@ -379,18 +388,12 @@ class MessageHandler {
       // Remove from channel subscriptions
       this.channelManager.removeClient(client);
 
-      // Find and remove player from any lobby they're in
-      // This is a bit inefficient but necessary for cleanup
-      const playerLobbies = this.lobbyManager.playerLobbies;
-      for (const [playerId, lobbyCode] of playerLobbies.entries()) {
-        const playerConnection = this.playerManager.getPlayerConnection(playerId);
-        if (playerConnection === client) {
-          this.lobbyManager.leaveLobby(playerId);
-          break;
-        }
-      }
+      // Remove client from any lobby they're in
+      this.lobbyManager.handleClientDisconnect(client);
 
-      this.logger.info('Client disconnected and cleaned up');
+      const clientData = this.playerManager.getPlayerData(client);
+      const address = clientData ? clientData.address : 'unknown';
+      this.logger.info(`Client ${address} disconnected and cleaned up`);
 
     } catch (error) {
       this.logger.error('Error during client disconnect cleanup:', error);

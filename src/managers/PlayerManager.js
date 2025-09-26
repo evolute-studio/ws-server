@@ -2,64 +2,85 @@ const { TIMEOUTS } = require('../config/constants');
 
 /**
  * Manages player presence tracking and online status
+ * Uses WebSocket connections as unique player identifiers for security
  */
 class PlayerManager {
   constructor(logger) {
     this.logger = logger;
-    this.playerLastPing = new Map(); // playerId -> timestamp
-    this.playerConnections = new Map(); // playerId -> WebSocket connection
+    this.connectionData = new Map(); // WebSocket -> { address, lastPing, connected }
 
     // Start automatic cleanup
     this.startCleanupInterval();
   }
 
   /**
-   * Update player's last ping timestamp
-   * @param {string} playerId - Player identifier
-   * @param {WebSocket} connection - Player's WebSocket connection
+   * Update player's ping data
+   * @param {WebSocket} client - Player's WebSocket connection
+   * @param {string} address - Player's address for display purposes (only set on first ping)
    */
-  updatePing(playerId, connection = null) {
+  updatePing(client, address = null) {
     const now = Date.now();
-    this.playerLastPing.set(playerId, now);
+    const existing = this.connectionData.get(client);
 
-    if (connection) {
-      this.playerConnections.set(playerId, connection);
+    if (existing) {
+      // Client already exists - only update ping, keep original address
+      existing.lastPing = now;
+      this.logger.debug(`Updated ping for existing client with address ${existing.address}`);
+
+      // Log warning if client tries to change address
+      if (address && address !== existing.address) {
+        this.logger.warn(`Client ${existing.address} attempted to change address to ${address} - rejected`);
+      }
+    } else {
+      // New client - set initial address
+      const finalAddress = address || 'unknown';
+      this.connectionData.set(client, {
+        address: finalAddress,
+        lastPing: now,
+        connected: now
+      });
+      this.logger.info(`New client connected with address ${finalAddress}`);
     }
-
-    this.logger.debug(`Updated ping for player ${playerId}`);
   }
 
   /**
-   * Check if player is currently online
-   * @param {string} playerId - Player identifier
-   * @returns {boolean} True if player is online
+   * Check if client is currently online
+   * @param {WebSocket} client - WebSocket connection
+   * @returns {boolean} True if client is online
    */
-  isOnline(playerId) {
-    const lastPing = this.playerLastPing.get(playerId);
-    if (!lastPing) return false;
+  isOnline(client) {
+    const data = this.connectionData.get(client);
+    if (!data || !data.lastPing) return false;
 
     const now = Date.now();
-    const isOnline = now - lastPing < TIMEOUTS.PLAYER_TIMEOUT;
+    const isOnline = now - data.lastPing < TIMEOUTS.PLAYER_TIMEOUT;
 
-    this.logger.debug(`Player ${playerId}: lastPing=${lastPing}, now=${now}, diff=${now - lastPing}ms, online=${isOnline}`);
+    this.logger.debug(`Client ${data.address}: lastPing=${data.lastPing}, now=${now}, diff=${now - data.lastPing}ms, online=${isOnline}`);
 
     return isOnline;
   }
 
   /**
-   * Get online status for multiple players
-   * @param {string[]} playerIds - Array of player identifiers
+   * Get online status for multiple players by address
+   * @param {string[]} addresses - Array of player addresses
    * @returns {boolean[]} Array of online statuses
    */
-  getOnlineStatuses(playerIds) {
-    if (!Array.isArray(playerIds)) {
-      this.logger.warn('getOnlineStatuses called with non-array:', playerIds);
+  getOnlineStatuses(addresses) {
+    if (!Array.isArray(addresses)) {
+      this.logger.warn('getOnlineStatuses called with non-array:', addresses);
       return [];
     }
 
-    const statuses = playerIds.map(playerId => {
-      const isOnline = this.isOnline(playerId);
-      this.logger.debug(`Player ${playerId}: online=${isOnline}`);
+    const statuses = addresses.map(address => {
+      // Find client by address
+      let isOnline = false;
+      for (const [client, data] of this.connectionData.entries()) {
+        if (data.address === address) {
+          isOnline = this.isOnline(client);
+          break;
+        }
+      }
+      this.logger.debug(`Address ${address}: online=${isOnline}`);
       return isOnline;
     });
 
@@ -68,34 +89,57 @@ class PlayerManager {
 
   /**
    * Get binary string representation of online statuses
-   * @param {string[]} playerIds - Array of player identifiers
+   * @param {string[]} addresses - Array of player addresses
    * @returns {string} Binary string (1=online, 0=offline)
    */
-  getBinaryOnlineStatuses(playerIds) {
-    const statuses = this.getOnlineStatuses(playerIds);
+  getBinaryOnlineStatuses(addresses) {
+    const statuses = this.getOnlineStatuses(addresses);
     return statuses.map(status => status ? '1' : '0').join('');
   }
 
   /**
-   * Get player's WebSocket connection
-   * @param {string} playerId - Player identifier
+   * Get player data by WebSocket connection
+   * @param {WebSocket} client - WebSocket connection
+   * @returns {Object|null} Player data or null
+   */
+  getPlayerData(client) {
+    return this.connectionData.get(client) || null;
+  }
+
+  /**
+   * Get client by address
+   * @param {string} address - Player address
+   * @returns {WebSocket|null} WebSocket connection or null
+   */
+  getClientByAddress(address) {
+    for (const [client, data] of this.connectionData.entries()) {
+      if (data.address === address) {
+        return client;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Get player's WebSocket connection (legacy compatibility)
+   * @param {string} playerId - Player identifier (address)
    * @returns {WebSocket|null} Player's connection or null
    */
   getPlayerConnection(playerId) {
-    return this.playerConnections.get(playerId) || null;
+    return this.getClientByAddress(playerId);
   }
 
   /**
    * Get all online players
-   * @returns {string[]} Array of online player IDs
+   * @returns {string[]} Array of online player addresses
    */
   getOnlinePlayers() {
     const now = Date.now();
     const onlinePlayers = [];
 
-    for (const [playerId, lastPing] of this.playerLastPing.entries()) {
-      if (now - lastPing < TIMEOUTS.PLAYER_TIMEOUT) {
-        onlinePlayers.push(playerId);
+    for (const [client, data] of this.connectionData.entries()) {
+      if (data.lastPing && now - data.lastPing < TIMEOUTS.PLAYER_TIMEOUT) {
+        onlinePlayers.push(data.address);
       }
     }
 
@@ -103,54 +147,64 @@ class PlayerManager {
   }
 
   /**
-   * Remove player from tracking
-   * @param {string} playerId - Player identifier
+   * Get all online clients
+   * @returns {WebSocket[]} Array of online WebSocket connections
    */
-  removePlayer(playerId) {
-    const hadPlayer = this.playerLastPing.has(playerId);
-    this.playerLastPing.delete(playerId);
-    this.playerConnections.delete(playerId);
+  getOnlineClients() {
+    const now = Date.now();
+    const onlineClients = [];
 
-    if (hadPlayer) {
-      this.logger.info(`Removed player from tracking: ${playerId}`);
+    for (const [client, data] of this.connectionData.entries()) {
+      if (data.lastPing && now - data.lastPing < TIMEOUTS.PLAYER_TIMEOUT) {
+        onlineClients.push(client);
+      }
+    }
+
+    return onlineClients;
+  }
+
+  /**
+   * Remove client from tracking
+   * @param {WebSocket} client - WebSocket connection
+   */
+  removeClient(client) {
+    const data = this.connectionData.get(client);
+    const hadClient = this.connectionData.has(client);
+    this.connectionData.delete(client);
+
+    if (hadClient && data) {
+      this.logger.info(`Removed client from tracking: ${data.address}`);
     }
   }
 
   /**
-   * Remove connection mapping when client disconnects
+   * Remove connection when client disconnects
    * @param {WebSocket} connection - WebSocket connection
    */
   removeConnection(connection) {
-    // Find and remove the player with this connection
-    for (const [playerId, conn] of this.playerConnections.entries()) {
-      if (conn === connection) {
-        this.playerConnections.delete(playerId);
-        this.logger.debug(`Removed connection mapping for player: ${playerId}`);
-        break;
-      }
-    }
+    this.removeClient(connection);
   }
 
   /**
-   * Clean up inactive players
+   * Clean up inactive clients
    */
-  cleanupInactivePlayers() {
+  cleanupInactiveClients() {
     const now = Date.now();
-    const playersToRemove = [];
+    const clientsToRemove = [];
 
-    for (const [playerId, lastPing] of this.playerLastPing.entries()) {
-      if (now - lastPing >= TIMEOUTS.PLAYER_TIMEOUT) {
-        playersToRemove.push(playerId);
+    for (const [client, data] of this.connectionData.entries()) {
+      if (data.lastPing && now - data.lastPing >= TIMEOUTS.PLAYER_TIMEOUT) {
+        clientsToRemove.push({ client, address: data.address });
       }
     }
 
-    for (const playerId of playersToRemove) {
-      this.removePlayer(playerId);
-      this.logger.info(`Cleaned up inactive player: ${playerId}`);
+    for (const { client, address } of clientsToRemove) {
+      this.removeClient(client);
+      this.logger.info(`Cleaned up inactive client: ${address}`);
     }
 
-    if (playersToRemove.length > 0) {
-      this.logger.info(`Cleanup completed: removed ${playersToRemove.length} inactive players`);
+    if (clientsToRemove.length > 0) {
+      this.logger.info(`Cleanup completed: removed ${clientsToRemove.length} inactive clients`);
     }
   }
 
@@ -159,10 +213,10 @@ class PlayerManager {
    */
   startCleanupInterval() {
     setInterval(() => {
-      this.cleanupInactivePlayers();
+      this.cleanupInactiveClients();
     }, TIMEOUTS.PLAYER_TIMEOUT);
 
-    this.logger.info(`Started player cleanup interval: ${TIMEOUTS.PLAYER_TIMEOUT}ms`);
+    this.logger.info(`Started client cleanup interval: ${TIMEOUTS.PLAYER_TIMEOUT}ms`);
   }
 
   /**
@@ -171,52 +225,55 @@ class PlayerManager {
    */
   getStats() {
     const now = Date.now();
-    const totalPlayers = this.playerLastPing.size;
-    const onlinePlayers = this.getOnlinePlayers().length;
-    const totalConnections = this.playerConnections.size;
+    const totalClients = this.connectionData.size;
+    const onlineClients = this.getOnlineClients().length;
 
     // Calculate average ping age
     let totalPingAge = 0;
-    for (const lastPing of this.playerLastPing.values()) {
-      totalPingAge += now - lastPing;
+    let clientsWithPing = 0;
+    for (const data of this.connectionData.values()) {
+      if (data.lastPing) {
+        totalPingAge += now - data.lastPing;
+        clientsWithPing++;
+      }
     }
-    const avgPingAge = totalPlayers > 0 ? Math.round(totalPingAge / totalPlayers) : 0;
+    const avgPingAge = clientsWithPing > 0 ? Math.round(totalPingAge / clientsWithPing) : 0;
 
     return {
-      totalPlayers,
-      onlinePlayers,
-      offlinePlayers: totalPlayers - onlinePlayers,
-      totalConnections,
+      totalPlayers: totalClients,
+      onlinePlayers: onlineClients,
+      offlinePlayers: totalClients - onlineClients,
+      totalConnections: totalClients,
       averagePingAge: avgPingAge,
       playerTimeout: TIMEOUTS.PLAYER_TIMEOUT
     };
   }
 
   /**
-   * Force cleanup and get detailed player info (for debugging)
-   * @returns {Object} Detailed player information
+   * Get detailed client info (for debugging)
+   * @returns {Object} Detailed client information
    */
   getDetailedStats() {
     const now = Date.now();
-    const players = [];
+    const clients = [];
 
-    for (const [playerId, lastPing] of this.playerLastPing.entries()) {
-      const pingAge = now - lastPing;
-      const isOnline = pingAge < TIMEOUTS.PLAYER_TIMEOUT;
-      const hasConnection = this.playerConnections.has(playerId);
+    for (const [client, data] of this.connectionData.entries()) {
+      const pingAge = data.lastPing ? now - data.lastPing : null;
+      const isOnline = data.lastPing ? pingAge < TIMEOUTS.PLAYER_TIMEOUT : false;
 
-      players.push({
-        playerId,
-        lastPing,
+      clients.push({
+        address: data.address,
+        lastPing: data.lastPing,
+        connected: data.connected,
         pingAge,
         isOnline,
-        hasConnection
+        clientConnected: client.readyState === 1
       });
     }
 
     return {
       ...this.getStats(),
-      players: players.sort((a, b) => a.pingAge - b.pingAge)
+      clients: clients.sort((a, b) => (a.pingAge || Infinity) - (b.pingAge || Infinity))
     };
   }
 }

@@ -63,15 +63,16 @@ async function testLobbyManager() {
     const playerManager = new PlayerManager(logger);
     const lobbyManager = new LobbyManager(logger, playerManager, channelManager);
 
-    const hostId = createTestPlayer(playerManager);
+    const hostClient = createTestPlayer(playerManager);
+    const hostAddress = playerManager.getPlayerData(hostClient).address;
 
-    const result = lobbyManager.createLobby(hostId);
+    const result = lobbyManager.createLobby(hostClient);
 
     TestAssertions.assertSuccessResult(result, 'Lobby creation should succeed');
     TestAssertions.assertLobbyStructure(result.lobby, 'Created lobby should have valid structure');
-    TestAssertions.assertEquals(result.lobby.host, hostId, 'Host should be set correctly');
+    TestAssertions.assertEquals(result.lobby.host, hostAddress, 'Host should be set correctly');
     TestAssertions.assertEquals(result.lobby.status, LOBBY_STATUS.WAITING, 'New lobby should be in waiting status');
-    TestAssertions.assertArrayContains(result.lobby.players, hostId, 'Host should be in players list');
+    TestAssertions.assertArrayContains(result.lobby.players, hostAddress, 'Host should be in players list');
     TestAssertions.assertEquals(result.lobby.spectators.length, 0, 'No spectators initially');
 
     const stats = lobbyManager.getStats();
