@@ -7,10 +7,59 @@ const { TIMEOUTS } = require('../config/constants');
 class PlayerManager {
   constructor(logger) {
     this.logger = logger;
-    this.connectionData = new Map(); // WebSocket -> { address, lastPing, connected }
+    this.connectionData = new Map(); // WebSocket -> { address, lastPing, connected, verified, registrationTime }
 
     // Start automatic cleanup
     this.startCleanupInterval();
+  }
+
+  /**
+   * Register player with signature verification
+   * @param {WebSocket} client - Player's WebSocket connection
+   * @param {string} address - Player's Starknet address
+   * @param {string} signature - Player's signature
+   * @param {string} publicKey - Player's public key
+   * @param {number} timestamp - Registration timestamp
+   * @returns {Object} Registration result
+   */
+  registerPlayer(client, address, signature, publicKey, timestamp) {
+    const existing = this.connectionData.get(client);
+
+    if (existing && existing.verified) {
+      return {
+        success: false,
+        error: 'ALREADY_REGISTERED',
+        message: 'Player is already registered and verified'
+      };
+    }
+
+    const now = Date.now();
+    this.connectionData.set(client, {
+      address,
+      lastPing: now,
+      connected: now,
+      verified: true,
+      registrationTime: now,
+      signature,
+      publicKey
+    });
+
+    this.logger.info(`Player registered and verified: ${address}`);
+    return {
+      success: true,
+      address,
+      verified: true
+    };
+  }
+
+  /**
+   * Check if player is registered and verified
+   * @param {WebSocket} client - Player's WebSocket connection
+   * @returns {boolean} True if player is registered and verified
+   */
+  isPlayerVerified(client) {
+    const data = this.connectionData.get(client);
+    return data && data.verified === true;
   }
 
   /**

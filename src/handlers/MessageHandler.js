@@ -1,5 +1,6 @@
 const { ACTIONS, EVENTS, ERROR_TYPES } = require('../config/constants');
 const { validateMessage, createErrorResponse, createSuccessResponse } = require('../utils/helpers');
+const SignatureVerifier = require('../utils/signatureVerifier');
 
 /**
  * Central message handler that routes WebSocket messages to appropriate managers
@@ -10,6 +11,7 @@ class MessageHandler {
     this.channelManager = channelManager;
     this.playerManager = playerManager;
     this.lobbyManager = lobbyManager;
+    this.signatureVerifier = new SignatureVerifier(logger);
 
     // Bind methods to preserve context
     this.handleMessage = this.handleMessage.bind(this);
@@ -49,6 +51,9 @@ class MessageHandler {
           return this.handlePublish(client, channel, payload);
 
         // Player Management Actions
+        case ACTIONS.REGISTER:
+          return this.handleRegister(client, payload);
+
         case ACTIONS.PING:
           return this.handlePing(client, payload);
 
@@ -134,8 +139,67 @@ class MessageHandler {
 
   // Player Management Handlers
 
+  handleRegister(client, payload) {
+    try {
+      const registerData = typeof payload === 'string' ? JSON.parse(payload) : payload;
+
+      if (!registerData || !registerData.address || !registerData.signature || !registerData.publicKey || !registerData.timestamp) {
+        return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Address, signature, publicKey and timestamp required for registration');
+      }
+
+      // Check if already registered
+      if (this.playerManager.isPlayerVerified(client)) {
+        return this.sendError(client, ERROR_TYPES.ALREADY_REGISTERED, 'Player is already registered and verified');
+      }
+
+      // Verify signature
+      const verificationResult = this.signatureVerifier.verifyPlayerRegistration(
+        registerData.address,
+        registerData.signature,
+        registerData.publicKey,
+        registerData.timestamp
+      );
+
+      if (!verificationResult.success) {
+        this.logger.warn(`Registration failed for ${registerData.address}: ${verificationResult.message}`);
+        return this.sendError(client, ERROR_TYPES.SIGNATURE_VERIFICATION_FAILED, verificationResult.message);
+      }
+
+      // Register player in PlayerManager
+      const registrationResult = this.playerManager.registerPlayer(
+        client,
+        registerData.address,
+        registerData.signature,
+        registerData.publicKey,
+        registerData.timestamp
+      );
+
+      if (!registrationResult.success) {
+        return this.sendError(client, registrationResult.error, registrationResult.message);
+      }
+
+      // Send success response
+      this.channelManager.sendToClient(client, EVENTS.REGISTRATION_SUCCESS, {
+        address: registerData.address,
+        verified: true,
+        timestamp: Date.now()
+      });
+
+      this.logger.info(`Player successfully registered: ${registerData.address}`);
+
+    } catch (error) {
+      this.logger.error('Error handling registration:', error);
+      this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Invalid registration data format');
+    }
+  }
+
   handlePing(client, payload) {
     try {
+      // Check if player is registered and verified
+      if (!this.playerManager.isPlayerVerified(client)) {
+        return this.sendError(client, ERROR_TYPES.NOT_REGISTERED, 'Player must register with signature before pinging');
+      }
+
       const pingData = typeof payload === 'string' ? JSON.parse(payload) : payload;
 
       if (!pingData || !pingData.Address) {
@@ -145,11 +209,11 @@ class MessageHandler {
       // Check if client is trying to change address
       const existingData = this.playerManager.getPlayerData(client);
       if (existingData && existingData.address !== pingData.Address) {
-        return this.sendError(client, ERROR_TYPES.INVALID_ACTION, 'Address cannot be changed after initial connection');
+        return this.sendError(client, ERROR_TYPES.INVALID_ACTION, 'Address cannot be changed after registration');
       }
 
       this.playerManager.updatePing(client, pingData.Address);
-      this.logger.debug(`Ping received from player ${pingData.Address}`);
+      this.logger.debug(`Ping received from verified player ${pingData.Address}`);
 
     } catch (error) {
       this.logger.error('Error handling ping:', error);

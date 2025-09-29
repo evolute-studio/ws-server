@@ -44,6 +44,7 @@ const ACTIONS = {
   PUBLISH: 'publish',
 
   // Player Actions
+  REGISTER: 'register',
   PING: 'ping',
   CHECK_ONLINE: 'check_online',
 
@@ -67,6 +68,7 @@ const ACTIONS = {
 // Event Types (outgoing to clients)
 const EVENTS = {
   // Player Events
+  REGISTRATION_SUCCESS: 'registration_success',
   ONLINE_STATUS: 'online_status',
 
   // Lobby Events
@@ -99,7 +101,11 @@ const ERROR_TYPES = {
   PERMISSION_DENIED: 'permission_denied',
   ALREADY_IN_LOBBY: 'already_in_lobby',
   INVITATION_NOT_FOUND: 'invitation_not_found',
-  MATCH_ERROR: 'match_error'
+  MATCH_ERROR: 'match_error',
+  SIGNATURE_VERIFICATION_FAILED: 'signature_verification_failed',
+  TIMESTAMP_EXPIRED: 'timestamp_expired',
+  ALREADY_REGISTERED: 'already_registered',
+  NOT_REGISTERED: 'not_registered'
 };
 
 module.exports = {
