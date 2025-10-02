@@ -205,11 +205,6 @@ class MessageHandler {
 
   handlePing(client, payload) {
     try {
-      // Check if player is registered and verified
-      if (!this.playerManager.isPlayerVerified(client)) {
-        return this.sendError(client, ERROR_TYPES.NOT_REGISTERED, 'Player must register with signature before pinging');
-      }
-
       const pingData = typeof payload === 'string' ? JSON.parse(payload) : payload;
 
       if (!pingData || !pingData.Address) {
@@ -219,11 +214,11 @@ class MessageHandler {
       // Check if client is trying to change address
       const existingData = this.playerManager.getPlayerData(client);
       if (existingData && existingData.address !== pingData.Address) {
-        return this.sendError(client, ERROR_TYPES.INVALID_ACTION, 'Address cannot be changed after registration');
+        return this.sendError(client, ERROR_TYPES.INVALID_ACTION, 'Address cannot be changed after initial connection');
       }
 
       this.playerManager.updatePing(client, pingData.Address);
-      this.logger.debug(`Ping received from verified player ${pingData.Address}`);
+      this.logger.debug(`Ping received from player ${pingData.Address}`);
 
     } catch (error) {
       this.logger.error('Error handling ping:', error);
