@@ -1,7 +1,5 @@
 const { ACTIONS, EVENTS, ERROR_TYPES } = require('../config/constants');
 const { validateMessage, createErrorResponse, createSuccessResponse } = require('../utils/helpers');
-const SignatureVerifier = require('../utils/signatureVerifier');
-
 /**
  * Central message handler that routes WebSocket messages to appropriate managers
  */
@@ -11,8 +9,6 @@ class MessageHandler {
     this.channelManager = channelManager;
     this.playerManager = playerManager;
     this.lobbyManager = lobbyManager;
-    this.signatureVerifier = new SignatureVerifier(logger);
-
     // Bind methods to preserve context
     this.handleMessage = this.handleMessage.bind(this);
   }
