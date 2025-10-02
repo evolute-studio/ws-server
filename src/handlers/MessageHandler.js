@@ -242,9 +242,9 @@ class MessageHandler {
 
   // Lobby Management Handlers
 
-  handleCreateLobby(client, payload) {
+  async handleCreateLobby(client, payload) {
     // No need to validate hostId from payload - we use client connection as ID
-    const result = this.lobbyManager.createLobby(client);
+    const result = await this.lobbyManager.createLobby(client);
 
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.LOBBY_CREATED, result.lobby);
@@ -255,12 +255,12 @@ class MessageHandler {
     }
   }
 
-  handleJoinLobby(client, payload) {
+  async handleJoinLobby(client, payload) {
     if (!payload || !payload.lobbyCode) {
       return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Lobby code required');
     }
 
-    const result = this.lobbyManager.joinLobby(client, payload.lobbyCode, payload.role);
+    const result = await this.lobbyManager.joinLobby(client, payload.lobbyCode, payload.role);
 
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.LOBBY_JOINED, {
@@ -274,9 +274,9 @@ class MessageHandler {
     }
   }
 
-  handleLeaveLobby(client, payload) {
+  async handleLeaveLobby(client, payload) {
     // No need to validate playerId from payload - we use client connection as ID
-    const result = this.lobbyManager.leaveLobby(client);
+    const result = await this.lobbyManager.leaveLobby(client);
 
     if (result.success) {
       const response = { success: true };
@@ -312,12 +312,12 @@ class MessageHandler {
     }
   }
 
-  handleKickPlayer(client, payload) {
+  async handleKickPlayer(client, payload) {
     if (!payload || !payload.targetPlayerId) {
       return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Target player ID (address) required');
     }
 
-    const result = this.lobbyManager.kickPlayer(client, payload.targetPlayerId);
+    const result = await this.lobbyManager.kickPlayer(client, payload.targetPlayerId);
 
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.PLAYER_KICKED, { success: true });
@@ -328,12 +328,12 @@ class MessageHandler {
     }
   }
 
-  handleChangeRole(client, payload) {
+  async handleChangeRole(client, payload) {
     if (!payload || !payload.newRole) {
       return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'New role required');
     }
 
-    const result = this.lobbyManager.changeRole(client, payload.newRole);
+    const result = await this.lobbyManager.changeRole(client, payload.newRole);
 
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.ROLE_CHANGED, {
@@ -349,12 +349,12 @@ class MessageHandler {
 
   // Invitation Handlers
 
-  handleInvitePlayer(client, payload) {
+  async handleInvitePlayer(client, payload) {
     if (!payload || !payload.targetPlayerId) {
       return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'Target player ID (address) required');
     }
 
-    const result = this.lobbyManager.invitePlayer(client, payload.targetPlayerId);
+    const result = await this.lobbyManager.invitePlayer(client, payload.targetPlayerId);
 
     if (result.success) {
       this.channelManager.sendToClient(client, EVENTS.INVITATION_RECEIVED, { success: true });
@@ -365,12 +365,12 @@ class MessageHandler {
     }
   }
 
-  handleAcceptInvitation(client, payload) {
+  async handleAcceptInvitation(client, payload) {
     if (!payload || !payload.fromPlayerId || !payload.lobbyCode) {
       return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'From player ID (address) and lobby code required');
     }
 
-    const result = this.lobbyManager.acceptInvitation(
+    const result = await this.lobbyManager.acceptInvitation(
       client,
       payload.fromPlayerId,
       payload.lobbyCode
@@ -388,12 +388,12 @@ class MessageHandler {
     }
   }
 
-  handleDeclineInvitation(client, payload) {
+  async handleDeclineInvitation(client, payload) {
     if (!payload || !payload.fromPlayerId || !payload.lobbyCode) {
       return this.sendError(client, ERROR_TYPES.INVALID_PAYLOAD, 'From player ID (address) and lobby code required');
     }
 
-    const result = this.lobbyManager.declineInvitation(
+    const result = await this.lobbyManager.declineInvitation(
       client,
       payload.fromPlayerId,
       payload.lobbyCode

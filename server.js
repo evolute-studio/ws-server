@@ -14,6 +14,7 @@ const ChannelManager = require('./src/managers/ChannelManager');
 const PlayerManager = require('./src/managers/PlayerManager');
 const LobbyManager = require('./src/managers/LobbyManager');
 const MessageHandler = require('./src/handlers/MessageHandler');
+const { disconnectPrisma } = require('./src/utils/prisma');
 
 /**
  * Main server class
@@ -54,7 +55,7 @@ class EvoluteWebSocketServer {
   /**
    * Start the WebSocket server
    */
-  start() {
+  async start() {
     try {
       const port = SERVER_CONFIG.DEFAULT_PORT;
       this.server = new WebSocket.Server({
@@ -74,9 +75,19 @@ class EvoluteWebSocketServer {
         this.logger.error('WebSocket server error:', error);
       });
 
-      this.server.on('listening', () => {
+      this.server.on('listening', async () => {
         this.logger.info(`WebSocket server successfully started on port ${port}`);
         this.logServerInfo();
+
+        // Restore lobbies from database
+        try {
+          const restoredCount = await this.lobbyManager.restoreLobbiesFromDatabase();
+          if (restoredCount > 0) {
+            this.logger.info(`Restored ${restoredCount} lobbies from database`);
+          }
+        } catch (error) {
+          this.logger.error('Error restoring lobbies from database:', error);
+        }
       });
 
       // Log statistics periodically (every 5 minutes)
@@ -197,6 +208,15 @@ class EvoluteWebSocketServer {
           }
         }
       });
+    }
+
+    // Disconnect from database
+    try {
+      this.logger.info('Disconnecting from database...');
+      await disconnectPrisma();
+      this.logger.info('Database connection closed');
+    } catch (error) {
+      this.logger.error('Error disconnecting from database:', error);
     }
 
     // Give clients time to disconnect gracefully

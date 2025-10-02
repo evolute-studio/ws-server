@@ -7,6 +7,13 @@ const {
   ERROR_TYPES
 } = require('../config/constants');
 const Lobby = require('../models/Lobby');
+const {
+  saveInvitation,
+  getPendingInvitations,
+  updateInvitationStatus,
+  cleanupExpiredInvitations,
+  deleteOldInvitations
+} = require('../utils/invitations');
 
 /**
  * Manages lobby system: creation, joining, invitations
@@ -25,6 +32,68 @@ class LobbyManager {
 
     // Start cleanup intervals
     this.startCleanupIntervals();
+  }
+
+  /**
+   * Restore active lobbies from database on server restart
+   * Note: WebSocket connections cannot be restored, so this is mainly for data recovery
+   * Players need to reconnect and rejoin their lobbies
+   * @returns {Promise<number>} Number of lobbies loaded from database
+   */
+  async restoreLobbiesFromDatabase() {
+    try {
+      this.logger.info('Restoring lobbies from database...');
+
+      // Get all active lobbies from database
+      const dbLobbies = await Lobby.getAllActive(TIMEOUTS.LOBBY_TIMEOUT);
+
+      if (dbLobbies.length === 0) {
+        this.logger.info('No active lobbies found in database');
+        return 0;
+      }
+
+      this.logger.info(`Found ${dbLobbies.length} active lobbies in database`);
+
+      // Log lobby information for debugging
+      for (const dbLobby of dbLobbies) {
+        this.logger.info(`  - Lobby ${dbLobby.code}: ${dbLobby.players.length + dbLobby.spectators.length} members, last activity: ${new Date(dbLobby.lastActivity).toISOString()}`);
+      }
+
+      // Note: Lobbies remain in database but need players to reconnect
+      // The in-memory lobbies map will be populated when players reconnect and join
+
+      return dbLobbies.length;
+    } catch (error) {
+      this.logger.error('Error restoring lobbies from database:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Get lobby from database if not in memory
+   * This is used when a player tries to rejoin after server restart
+   * @param {string} lobbyCode - Lobby code
+   * @returns {Promise<Object|null>} Lobby data from database
+   */
+  async getOrLoadLobby(lobbyCode) {
+    // Check if lobby is already in memory
+    let lobby = this.lobbies.get(lobbyCode);
+    if (lobby) {
+      return lobby;
+    }
+
+    // Try to load from database
+    try {
+      const dbLobby = await Lobby.loadFromDatabase(lobbyCode, this.playerManager);
+      if (dbLobby) {
+        this.logger.info(`Loaded lobby ${lobbyCode} from database (ID: ${dbLobby.id})`);
+        return dbLobby;
+      }
+      return null;
+    } catch (error) {
+      this.logger.error(`Error loading lobby ${lobbyCode} from database:`, error);
+      return null;
+    }
   }
 
   /**
@@ -47,9 +116,9 @@ class LobbyManager {
   /**
    * Create new lobby
    * @param {WebSocket} hostClient - Host WebSocket connection
-   * @returns {Object} Result object with lobby info or error
+   * @returns {Promise<Object>} Result object with lobby info or error
    */
-  createLobby(hostClient) {
+  async createLobby(hostClient) {
     try {
       // Validate host client
       if (!hostClient) {
@@ -81,6 +150,9 @@ class LobbyManager {
       const code = this.generateLobbyCode();
       const lobby = new Lobby(code, hostClient, this.playerManager);
 
+      // Save lobby to database
+      await lobby.save();
+
       this.lobbies.set(code, lobby);
       this.clientLobbies.set(hostClient, code);
 
@@ -88,7 +160,7 @@ class LobbyManager {
       this.channelManager.subscribe(hostClient, `lobby_${code}`);
 
       const hostAddress = this.playerManager.getPlayerData(hostClient)?.address || 'unknown';
-      this.logger.info(`Lobby created: ${code} by ${hostAddress}`);
+      this.logger.info(`Lobby created: ${code} by ${hostAddress} (ID: ${lobby.id})`);
 
       return {
         success: true,
@@ -111,9 +183,9 @@ class LobbyManager {
    * @param {WebSocket} client - WebSocket connection
    * @param {string} lobbyCode - Lobby code to join
    * @param {string} role - Role to join as ('player' or 'spectator')
-   * @returns {Object} Result object
+   * @returns {Promise<Object>} Result object
    */
-  joinLobby(client, lobbyCode, role = PLAYER_ROLES.PLAYER) {
+  async joinLobby(client, lobbyCode, role = PLAYER_ROLES.PLAYER) {
     try {
       // Validate client
       if (!client) {
@@ -187,6 +259,9 @@ class LobbyManager {
         };
       }
 
+      // Save updated lobby to database
+      await lobby.save();
+
       this.clientLobbies.set(client, lobbyCode);
 
       // Subscribe client to lobby channel
@@ -222,9 +297,9 @@ class LobbyManager {
   /**
    * Leave lobby
    * @param {WebSocket} client - WebSocket connection
-   * @returns {Object} Result object
+   * @returns {Promise<Object>} Result object
    */
-  leaveLobby(client) {
+  async leaveLobby(client) {
     try {
       const lobbyCode = this.clientLobbies.get(client);
       if (!lobbyCode) {
@@ -268,15 +343,20 @@ class LobbyManager {
           lobby.transferHost(lobby.players[0]);
           const newHostAddress = lobby.getClientAddress(lobby.host);
           this.logger.info(`Host transferred to ${newHostAddress} in lobby ${lobbyCode}`);
+          // Save updated host to database
+          await lobby.save();
         } else {
           // No players left, close lobby
-          this.closeLobby(lobbyCode);
+          await this.closeLobby(lobbyCode);
           return {
             success: true,
             event: EVENTS.LOBBY_LEFT,
             lobbyClosed: true
           };
         }
+      } else {
+        // Save updated player list to database
+        await lobby.save();
       }
 
       // Notify remaining lobby members
@@ -333,9 +413,9 @@ class LobbyManager {
    * Send invitation to player (by address)
    * @param {WebSocket} fromClient - Inviting client
    * @param {string} targetPlayerAddress - Target player address
-   * @returns {Object} Result object
+   * @returns {Promise<Object>} Result object
    */
-  invitePlayer(fromClient, targetPlayerAddress) {
+  async invitePlayer(fromClient, targetPlayerAddress) {
     try {
       const lobbyCode = this.clientLobbies.get(fromClient);
       if (!lobbyCode) {
@@ -375,14 +455,18 @@ class LobbyManager {
       }
 
       const fromPlayerAddress = this.playerManager.getPlayerData(fromClient)?.address || 'unknown';
+
+      // Save invitation to database
+      const dbInvitation = await saveInvitation(fromPlayerAddress, targetPlayerAddress, lobbyCode);
+
       const invitation = {
         fromPlayerId: fromPlayerAddress,
         fromPlayerName: fromPlayerAddress, // Could be enhanced with actual names
         lobbyCode,
-        timestamp: Date.now()
+        timestamp: dbInvitation.timestamp.getTime()
       };
 
-      // Add invitation
+      // Add invitation to in-memory cache for online player
       if (!this.clientInvitations.has(targetClient)) {
         this.clientInvitations.set(targetClient, new Set());
       }
@@ -396,7 +480,7 @@ class LobbyManager {
         }
       });
 
-      this.logger.info(`Invitation sent from ${fromPlayerAddress} to ${targetPlayerAddress} for lobby ${lobbyCode}`);
+      this.logger.info(`Invitation sent from ${fromPlayerAddress} to ${targetPlayerAddress} for lobby ${lobbyCode} (saved to DB)`);
 
       return {
         success: true,
@@ -418,9 +502,9 @@ class LobbyManager {
    * @param {WebSocket} client - Client accepting invitation
    * @param {string} fromPlayerAddress - Original inviter address
    * @param {string} lobbyCode - Lobby code
-   * @returns {Object} Result object
+   * @returns {Promise<Object>} Result object
    */
-  acceptInvitation(client, fromPlayerAddress, lobbyCode) {
+  async acceptInvitation(client, fromPlayerAddress, lobbyCode) {
     try {
       const invitations = this.clientInvitations.get(client);
       if (!invitations) {
@@ -448,20 +532,23 @@ class LobbyManager {
         };
       }
 
-      // Remove the invitation
+      // Remove the invitation from in-memory cache
       invitations.delete(invitation);
       if (invitations.size === 0) {
         this.clientInvitations.delete(client);
       }
 
+      // Update invitation status in database
+      const accepterAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+      await updateInvitationStatus(fromPlayerAddress, accepterAddress, lobbyCode, 'accepted');
+
       // Join the lobby
-      const joinResult = this.joinLobby(client, lobbyCode, PLAYER_ROLES.PLAYER);
+      const joinResult = await this.joinLobby(client, lobbyCode, PLAYER_ROLES.PLAYER);
 
       if (joinResult.success) {
         // Notify inviter
         const inviterClient = this.playerManager.getClientByAddress(fromPlayerAddress);
         if (inviterClient) {
-          const accepterAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
           this.channelManager.sendToClient(inviterClient, EVENTS.INVITATION_ACCEPTED, {
             playerId: accepterAddress,
             lobbyCode
@@ -486,9 +573,9 @@ class LobbyManager {
    * @param {WebSocket} client - Client declining invitation
    * @param {string} fromPlayerAddress - Original inviter address
    * @param {string} lobbyCode - Lobby code
-   * @returns {Object} Result object
+   * @returns {Promise<Object>} Result object
    */
-  declineInvitation(client, fromPlayerAddress, lobbyCode) {
+  async declineInvitation(client, fromPlayerAddress, lobbyCode) {
     try {
       const invitations = this.clientInvitations.get(client);
       if (!invitations) {
@@ -521,17 +608,19 @@ class LobbyManager {
         this.clientInvitations.delete(client);
       }
 
+      // Update invitation status in database
+      const declinerAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
+      await updateInvitationStatus(fromPlayerAddress, declinerAddress, lobbyCode, 'declined');
+
       // Notify inviter
       const inviterClient = this.playerManager.getClientByAddress(fromPlayerAddress);
       if (inviterClient) {
-        const declinerAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
         this.channelManager.sendToClient(inviterClient, EVENTS.INVITATION_DECLINED, {
           playerId: declinerAddress,
           lobbyCode
         });
       }
 
-      const declinerAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
       this.logger.info(`Invitation declined by ${declinerAddress} from ${fromPlayerAddress} for lobby ${lobbyCode}`);
 
       return {
@@ -553,9 +642,9 @@ class LobbyManager {
    * Kick player from lobby (host only)
    * @param {WebSocket} hostClient - Host client
    * @param {string} targetPlayerAddress - Player address to kick
-   * @returns {Object} Result object
+   * @returns {Promise<Object>} Result object
    */
-  kickPlayer(hostClient, targetPlayerAddress) {
+  async kickPlayer(hostClient, targetPlayerAddress) {
     try {
       const lobbyCode = this.clientLobbies.get(hostClient);
       if (!lobbyCode) {
@@ -598,6 +687,9 @@ class LobbyManager {
       lobby.removePlayer(targetClient);
       this.clientLobbies.delete(targetClient);
 
+      // Save updated lobby to database
+      await lobby.save();
+
       // Unsubscribe kicked player
       this.channelManager.unsubscribe(targetClient, `lobby_${lobbyCode}`);
       this.channelManager.sendToClient(targetClient, EVENTS.PLAYER_KICKED, {
@@ -633,9 +725,9 @@ class LobbyManager {
    * Change player role between player and spectator
    * @param {WebSocket} client - Client requesting role change
    * @param {string} newRole - New role (player or spectator)
-   * @returns {Object} Result object
+   * @returns {Promise<Object>} Result object
    */
-  changeRole(client, newRole) {
+  async changeRole(client, newRole) {
     try {
       // Validate role (only player and spectator are allowed)
       if (newRole !== PLAYER_ROLES.PLAYER && newRole !== PLAYER_ROLES.SPECTATOR) {
@@ -673,6 +765,9 @@ class LobbyManager {
           message: changeResult.message
         };
       }
+
+      // Save updated lobby to database
+      await lobby.save();
 
       // Broadcast role change to all lobby members
       const clientAddress = this.playerManager.getPlayerData(client)?.address || 'unknown';
@@ -751,8 +846,9 @@ class LobbyManager {
   /**
    * Close lobby and clean up
    * @param {string} lobbyCode - Lobby code
+   * @returns {Promise<void>}
    */
-  closeLobby(lobbyCode) {
+  async closeLobby(lobbyCode) {
     const lobby = this.lobbies.get(lobbyCode);
     if (!lobby) return;
 
@@ -770,8 +866,11 @@ class LobbyManager {
       this.lobbyMatches.delete(lobby.currentMatch);
     }
 
+    // Delete from database
+    await lobby.delete();
+
     this.lobbies.delete(lobbyCode);
-    this.logger.info(`Lobby ${lobbyCode} closed`);
+    this.logger.info(`Lobby ${lobbyCode} closed and deleted from database`);
   }
 
   /**
@@ -816,11 +915,13 @@ class LobbyManager {
 
   /**
    * Clean up expired invitations
+   * @returns {Promise<void>}
    */
-  cleanupInvitations() {
+  async cleanupInvitations() {
     const now = Date.now();
     let cleanedCount = 0;
 
+    // Clean up in-memory invitations
     for (const [client, invitations] of this.clientInvitations.entries()) {
       const validInvitations = new Set();
 
@@ -840,16 +941,34 @@ class LobbyManager {
     }
 
     if (cleanedCount > 0) {
-      this.logger.info(`Cleaned up ${cleanedCount} expired invitations`);
+      this.logger.info(`Cleaned up ${cleanedCount} expired invitations from memory`);
+    }
+
+    // Clean up database invitations
+    try {
+      const expiredCount = await cleanupExpiredInvitations();
+      if (expiredCount > 0) {
+        this.logger.info(`Marked ${expiredCount} invitations as expired in database`);
+      }
+
+      // Also delete old invitations
+      const deletedCount = await deleteOldInvitations();
+      if (deletedCount > 0) {
+        this.logger.info(`Deleted ${deletedCount} old invitations from database`);
+      }
+    } catch (error) {
+      this.logger.error('Error cleaning up database invitations:', error);
     }
   }
 
   /**
    * Clean up inactive lobbies
+   * @returns {Promise<number>} Number of cleaned up lobbies
    */
-  cleanupLobbies() {
+  async cleanupLobbies() {
     const lobbiesToClose = [];
 
+    // Clean up in-memory lobbies
     for (const [lobbyCode, lobby] of this.lobbies.entries()) {
       if (lobby.isInactive(TIMEOUTS.LOBBY_TIMEOUT)) {
         lobbiesToClose.push(lobbyCode);
@@ -857,8 +976,19 @@ class LobbyManager {
     }
 
     for (const lobbyCode of lobbiesToClose) {
-      this.closeLobby(lobbyCode);
+      await this.closeLobby(lobbyCode);
       this.logger.info(`Closed inactive lobby: ${lobbyCode}`);
+    }
+
+    // Also clean up orphaned lobbies in database (not in memory)
+    const Lobby = require('../models/Lobby');
+    try {
+      const deletedCount = await Lobby.deleteInactive(TIMEOUTS.LOBBY_TIMEOUT);
+      if (deletedCount > 0) {
+        this.logger.info(`Deleted ${deletedCount} inactive lobbies from database`);
+      }
+    } catch (error) {
+      this.logger.error('Error cleaning up database lobbies:', error);
     }
 
     return lobbiesToClose.length;

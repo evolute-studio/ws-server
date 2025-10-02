@@ -1,8 +1,10 @@
-const { LOBBY_STATUS, LOBBY_CONFIG } = require('../config/constants');
+const { LOBBY_STATUS, LOBBY_CONFIG, PLAYER_ROLES } = require('../config/constants');
+const { getPrismaClient } = require('../utils/prisma');
 
 /**
  * Lobby data structure with clearly defined fields
  * Uses WebSocket connections as player identifiers for security
+ * Syncs with PostgreSQL database for persistence
  */
 class Lobby {
   /**
@@ -10,23 +12,28 @@ class Lobby {
    * @param {string} code - Unique lobby code
    * @param {WebSocket} hostClient - Host WebSocket connection
    * @param {PlayerManager} playerManager - PlayerManager instance for getting display addresses
+   * @param {string} id - Database ID (optional, for loaded lobbies)
    */
-  constructor(code, hostClient, playerManager = null) {
-    // Required fields
+  constructor(code, hostClient, playerManager = null, id = null) {
+    // Database fields
+    this.id = id;                        // UUID from database
     this.code = code;                    // Unique 6-character lobby code
-    this.host = hostClient;              // WebSocket connection of the lobby host
-    this.players = [hostClient];         // Array of active player WebSocket connections (max 2 for 1v1)
-    this.spectators = [];                // Array of spectator WebSocket connections (max 10)
     this.status = LOBBY_STATUS.WAITING;  // Current lobby status (waiting/ready)
     this.created = Date.now();           // Timestamp when lobby was created
     this.lastActivity = Date.now();      // Timestamp of last activity
-    this.chatHistory = [];               // Array of chat message objects
-
-    // Match-related (for blockchain integration)
     this.currentMatch = null;            // Current match ID (if any)
+
+    // In-memory fields (WebSocket connections)
+    this.host = hostClient;              // WebSocket connection of the lobby host
+    this.players = [hostClient];         // Array of active player WebSocket connections (max 2 for 1v1)
+    this.spectators = [];                // Array of spectator WebSocket connections (max 10)
+    this.chatHistory = [];               // Array of chat message objects (loaded from DB)
 
     // Helper reference for getting display information
     this.playerManager = playerManager;
+
+    // Track if lobby needs to be saved to DB
+    this._isDirty = false;
   }
 
   /**
@@ -113,6 +120,14 @@ class Lobby {
     }
 
     this.updateActivity();
+
+    // Save chat message to database asynchronously (fire and forget)
+    if (this.id) {
+      this.saveChatMessage(chatMessage).catch(err => {
+        console.error('Failed to save chat message to database:', err);
+      });
+    }
+
     return chatMessage;
   }
 
@@ -262,6 +277,287 @@ class Lobby {
    */
   isInactive(timeoutMs) {
     return Date.now() - this.lastActivity >= timeoutMs;
+  }
+
+  /**
+   * Mark lobby as dirty (needs to be saved)
+   */
+  markDirty() {
+    this._isDirty = true;
+  }
+
+  /**
+   * Save lobby to database
+   * @returns {Promise<Object>} Database lobby object
+   */
+  async save() {
+    const prisma = getPrismaClient();
+    const hostAddress = this.getClientAddress(this.host);
+
+    try {
+      if (!this.id) {
+        // Create new lobby in database
+        const lobby = await prisma.lobby.create({
+          data: {
+            code: this.code,
+            hostAddress,
+            status: this.status,
+            created: new Date(this.created),
+            lastActivity: new Date(this.lastActivity),
+            currentMatch: this.currentMatch,
+            players: {
+              create: this.players.map(client => ({
+                playerAddress: this.getClientAddress(client),
+                role: PLAYER_ROLES.PLAYER
+              })).concat(
+                this.spectators.map(client => ({
+                  playerAddress: this.getClientAddress(client),
+                  role: PLAYER_ROLES.SPECTATOR
+                }))
+              )
+            }
+          },
+          include: {
+            players: true,
+            chatMessages: true
+          }
+        });
+
+        this.id = lobby.id;
+        this._isDirty = false;
+        return lobby;
+      } else {
+        // Update existing lobby
+        const lobby = await prisma.lobby.update({
+          where: { id: this.id },
+          data: {
+            hostAddress,
+            status: this.status,
+            lastActivity: new Date(this.lastActivity),
+            currentMatch: this.currentMatch,
+            players: {
+              deleteMany: {},
+              create: this.players.map(client => ({
+                playerAddress: this.getClientAddress(client),
+                role: PLAYER_ROLES.PLAYER
+              })).concat(
+                this.spectators.map(client => ({
+                  playerAddress: this.getClientAddress(client),
+                  role: PLAYER_ROLES.SPECTATOR
+                }))
+              )
+            }
+          },
+          include: {
+            players: true,
+            chatMessages: true
+          }
+        });
+
+        this._isDirty = false;
+        return lobby;
+      }
+    } catch (error) {
+      throw new Error(`Failed to save lobby: ${error.message}`);
+    }
+  }
+
+  /**
+   * Save chat message to database
+   * @param {Object} chatMessage - Chat message object
+   * @returns {Promise<Object>} Database chat message
+   */
+  async saveChatMessage(chatMessage) {
+    if (!this.id) {
+      throw new Error('Cannot save chat message: lobby not saved to database');
+    }
+
+    const prisma = getPrismaClient();
+
+    try {
+      const dbMessage = await prisma.chatMessage.create({
+        data: {
+          lobbyId: this.id,
+          playerAddress: chatMessage.playerId,
+          message: chatMessage.message,
+          timestamp: new Date(chatMessage.timestamp)
+        }
+      });
+
+      return dbMessage;
+    } catch (error) {
+      throw new Error(`Failed to save chat message: ${error.message}`);
+    }
+  }
+
+  /**
+   * Load chat history from database
+   * @param {number} limit - Maximum number of messages to load (default: 50)
+   * @returns {Promise<Array>} Array of chat messages
+   */
+  async loadChatHistory(limit = 50) {
+    if (!this.id) {
+      return [];
+    }
+
+    const prisma = getPrismaClient();
+
+    try {
+      const messages = await prisma.chatMessage.findMany({
+        where: { lobbyId: this.id },
+        orderBy: { timestamp: 'desc' },
+        take: limit
+      });
+
+      // Convert to client format and reverse (oldest first)
+      this.chatHistory = messages.reverse().map(msg => ({
+        playerId: msg.playerAddress,
+        message: msg.message,
+        timestamp: msg.timestamp.getTime()
+      }));
+
+      return this.chatHistory;
+    } catch (error) {
+      throw new Error(`Failed to load chat history: ${error.message}`);
+    }
+  }
+
+  /**
+   * Delete lobby from database
+   * @returns {Promise<void>}
+   */
+  async delete() {
+    if (!this.id) {
+      return;
+    }
+
+    const prisma = getPrismaClient();
+
+    try {
+      await prisma.lobby.delete({
+        where: { id: this.id }
+      });
+
+      this.id = null;
+    } catch (error) {
+      throw new Error(`Failed to delete lobby: ${error.message}`);
+    }
+  }
+
+  /**
+   * Load lobby from database by code
+   * @param {string} code - Lobby code
+   * @param {PlayerManager} playerManager - PlayerManager instance
+   * @returns {Promise<Object|null>} Database lobby object or null
+   */
+  static async loadFromDatabase(code, playerManager = null) {
+    const prisma = getPrismaClient();
+
+    try {
+      const dbLobby = await prisma.lobby.findUnique({
+        where: { code },
+        include: {
+          players: true,
+          chatMessages: {
+            orderBy: { timestamp: 'desc' },
+            take: 50
+          }
+        }
+      });
+
+      if (!dbLobby) {
+        return null;
+      }
+
+      return {
+        id: dbLobby.id,
+        code: dbLobby.code,
+        hostAddress: dbLobby.hostAddress,
+        status: dbLobby.status,
+        created: dbLobby.created.getTime(),
+        lastActivity: dbLobby.lastActivity.getTime(),
+        currentMatch: dbLobby.currentMatch,
+        players: dbLobby.players.filter(p => p.role === 'player'),
+        spectators: dbLobby.players.filter(p => p.role === 'spectator'),
+        chatMessages: dbLobby.chatMessages.reverse().map(msg => ({
+          playerId: msg.playerAddress,
+          message: msg.message,
+          timestamp: msg.timestamp.getTime()
+        }))
+      };
+    } catch (error) {
+      throw new Error(`Failed to load lobby from database: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get all active lobbies from database
+   * @param {number} inactiveThresholdMs - Threshold for considering lobby inactive
+   * @returns {Promise<Array>} Array of database lobby objects
+   */
+  static async getAllActive(inactiveThresholdMs) {
+    const prisma = getPrismaClient();
+    const cutoffTime = new Date(Date.now() - inactiveThresholdMs);
+
+    try {
+      const lobbies = await prisma.lobby.findMany({
+        where: {
+          lastActivity: {
+            gte: cutoffTime
+          }
+        },
+        include: {
+          players: true,
+          chatMessages: {
+            orderBy: { timestamp: 'desc' },
+            take: 50
+          }
+        }
+      });
+
+      return lobbies.map(dbLobby => ({
+        id: dbLobby.id,
+        code: dbLobby.code,
+        hostAddress: dbLobby.hostAddress,
+        status: dbLobby.status,
+        created: dbLobby.created.getTime(),
+        lastActivity: dbLobby.lastActivity.getTime(),
+        currentMatch: dbLobby.currentMatch,
+        players: dbLobby.players.filter(p => p.role === 'player'),
+        spectators: dbLobby.players.filter(p => p.role === 'spectator'),
+        chatMessages: dbLobby.chatMessages.reverse().map(msg => ({
+          playerId: msg.playerAddress,
+          message: msg.message,
+          timestamp: msg.timestamp.getTime()
+        }))
+      }));
+    } catch (error) {
+      throw new Error(`Failed to get active lobbies: ${error.message}`);
+    }
+  }
+
+  /**
+   * Delete inactive lobbies from database
+   * @param {number} inactiveThresholdMs - Threshold for considering lobby inactive
+   * @returns {Promise<number>} Number of deleted lobbies
+   */
+  static async deleteInactive(inactiveThresholdMs) {
+    const prisma = getPrismaClient();
+    const cutoffTime = new Date(Date.now() - inactiveThresholdMs);
+
+    try {
+      const result = await prisma.lobby.deleteMany({
+        where: {
+          lastActivity: {
+            lt: cutoffTime
+          }
+        }
+      });
+
+      return result.count;
+    } catch (error) {
+      throw new Error(`Failed to delete inactive lobbies: ${error.message}`);
+    }
   }
 }
 

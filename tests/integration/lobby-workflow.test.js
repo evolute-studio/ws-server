@@ -45,7 +45,7 @@ async function testLobbyWorkflow() {
 
     // Step 1: Host creates lobby
     const hostId = TestDataGenerator.generatePlayerId('host');
-    playerManager.updatePing(hostId, hostClient);
+    playerManager.updatePing(hostClient, hostId);
 
     const createMessage = TestDataGenerator.generateWebSocketMessage(ACTIONS.CREATE_LOBBY, { hostId });
     await messageHandler.handleMessage(hostClient, createMessage);
@@ -61,7 +61,7 @@ async function testLobbyWorkflow() {
 
     // Step 2: Player joins lobby
     const playerId = TestDataGenerator.generatePlayerId('player');
-    playerManager.updatePing(playerId, playerClient);
+    playerManager.updatePing(playerClient, playerId);
 
     const joinMessage = TestDataGenerator.generateWebSocketMessage(ACTIONS.JOIN_LOBBY, {
       playerId,
@@ -84,7 +84,7 @@ async function testLobbyWorkflow() {
 
     // Step 3: Spectator joins
     const spectatorId = TestDataGenerator.generatePlayerId('spectator');
-    playerManager.updatePing(spectatorId, spectatorClient);
+    playerManager.updatePing(spectatorClient, spectatorId);
 
     const spectatorJoinMessage = TestDataGenerator.generateWebSocketMessage(ACTIONS.JOIN_LOBBY, {
       playerId: spectatorId,
@@ -139,16 +139,16 @@ async function testLobbyWorkflow() {
     const playerId = TestDataGenerator.generatePlayerId('player');
     const spectatorId = TestDataGenerator.generatePlayerId('spectator');
 
-    playerManager.updatePing(hostId, hostClient);
-    playerManager.updatePing(playerId, playerClient);
-    playerManager.updatePing(spectatorId, spectatorClient);
+    playerManager.updatePing(hostClient, hostId);
+    playerManager.updatePing(playerClient, playerId);
+    playerManager.updatePing(spectatorClient, spectatorId);
 
     await wait(10);
 
     // Quick setup: create lobby and join players
-    const lobbyResult = lobbyManager.createLobby(hostId);
-    lobbyManager.joinLobby(playerId, lobbyResult.lobby.code);
-    lobbyManager.joinLobby(spectatorId, lobbyResult.lobby.code, PLAYER_ROLES.SPECTATOR);
+    const lobbyResult = await lobbyManager.createLobby(hostClient);
+    await lobbyManager.joinLobby(playerClient, lobbyResult.lobby.code);
+    await lobbyManager.joinLobby(spectatorClient, lobbyResult.lobby.code, PLAYER_ROLES.SPECTATOR);
 
     // Subscribe all to lobby channel
     channelManager.subscribe(hostClient, `lobby_${lobbyResult.lobby.code}`);
@@ -215,15 +215,15 @@ async function testLobbyWorkflow() {
     const hostId = TestDataGenerator.generatePlayerId('host');
     const playerId = TestDataGenerator.generatePlayerId('player');
 
-    playerManager.updatePing(hostId, hostClient);
-    playerManager.updatePing(playerId, playerClient);
+    playerManager.updatePing(hostClient, hostId);
+    playerManager.updatePing(playerClient, playerId);
 
     await wait(10);
 
     // Create lobby and join player
-    const lobbyResult = lobbyManager.createLobby(hostId);
+    const lobbyResult = await lobbyManager.createLobby(hostClient);
     const lobbyCode = lobbyResult.lobby.code;
-    lobbyManager.joinLobby(playerId, lobbyCode);
+    await lobbyManager.joinLobby(playerClient, lobbyCode);
 
     // Subscribe to lobby channels
     channelManager.subscribe(hostClient, `lobby_${lobbyCode}`);
@@ -265,16 +265,16 @@ async function testLobbyWorkflow() {
 
     const playerIds = TestDataGenerator.generatePlayerIds(3);
     for (let i = 0; i < 3; i++) {
-      playerManager.updatePing(playerIds[i], clients[i]);
+      playerManager.updatePing(clients[i], playerIds[i]);
     }
 
     await wait(10);
 
     // Setup lobby with all players
-    const lobbyResult = lobbyManager.createLobby(playerIds[0]);
+    const lobbyResult = await lobbyManager.createLobby(clients[0]);
     const lobbyCode = lobbyResult.lobby.code;
-    lobbyManager.joinLobby(playerIds[1], lobbyCode);
-    lobbyManager.joinLobby(playerIds[2], lobbyCode, PLAYER_ROLES.SPECTATOR);
+    await lobbyManager.joinLobby(clients[1], lobbyCode);
+    await lobbyManager.joinLobby(clients[2], lobbyCode, PLAYER_ROLES.SPECTATOR);
 
     // Subscribe all to lobby channel
     for (const client of clients) {
@@ -407,7 +407,7 @@ async function testLobbyWorkflow() {
       clients.push(client);
 
       const hostId = TestDataGenerator.generatePlayerId(`host${i}`);
-      playerManager.updatePing(hostId, client);
+      playerManager.updatePing(client, hostId);
       hostIds.push(hostId);
     }
 

@@ -1,15 +1,17 @@
-/**
+    /**
  * Main Test Runner for WebSocket Server
  * Runs all unit tests and provides comprehensive reporting
  */
 
 const TestLogger = require('./utils/TestLogger');
+const { disconnectPrisma } = require('../src/utils/prisma');
 
 // Test modules
 const testPlayerManager = require('./unit/PlayerManager.test');
 const testChannelManager = require('./unit/ChannelManager.test');
 const testLobbyManager = require('./unit/LobbyManager.test');
 const testLobbyWorkflow = require('./integration/lobby-workflow.test');
+// Database persistence tests run separately (see run-db-tests.js)
 
 /**
  * Main test runner
@@ -125,6 +127,7 @@ function printFinalSummary(logger, results) {
   // Final status
   if (results.failed === 0) {
     logger.pass('\n🎉 ALL TESTS PASSED! System is ready for production.');
+    logger.info('\n💡 Tip: Run `node tests/run-db-tests.js` to test database persistence');
   } else {
     logger.fail(`\n💥 ${results.failed} TESTS FAILED. Please fix issues before deployment.`);
   }
@@ -184,10 +187,12 @@ if (require.main === module) {
     runSpecificSuite(args[0]);
   } else {
     // Run all tests
-    runAllTests().then(results => {
+    runAllTests().then(async results => {
+      await disconnectPrisma();
       process.exit(results.failed > 0 ? 1 : 0);
-    }).catch(error => {
+    }).catch(async error => {
       console.error('Test runner failed:', error);
+      await disconnectPrisma();
       process.exit(1);
     });
   }

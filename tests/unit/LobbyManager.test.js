@@ -66,7 +66,7 @@ async function testLobbyManager() {
     const hostClient = createTestPlayer(playerManager);
     const hostAddress = playerManager.getPlayerData(hostClient).address;
 
-    const result = lobbyManager.createLobby(hostClient);
+    const result = await lobbyManager.createLobby(hostClient);
 
     TestAssertions.assertSuccessResult(result, 'Lobby creation should succeed');
     TestAssertions.assertLobbyStructure(result.lobby, 'Created lobby should have valid structure');
@@ -89,15 +89,15 @@ async function testLobbyManager() {
     const hostId = createTestPlayer(playerManager);
 
     // Create first lobby successfully
-    const firstResult = lobbyManager.createLobby(hostId);
+    const firstResult = await lobbyManager.createLobby(hostId);
     TestAssertions.assertSuccessResult(firstResult, 'First lobby creation should succeed');
 
     // Try to create second lobby with same host (should fail)
-    const secondResult = lobbyManager.createLobby(hostId);
+    const secondResult = await lobbyManager.createLobby(hostId);
     TestAssertions.assertErrorResult(secondResult, ERROR_TYPES.ALREADY_IN_LOBBY, 'Second lobby creation should fail');
 
     // Try to create lobby with offline player (should fail)
-    const offlineResult = lobbyManager.createLobby('offline_player');
+    const offlineResult = await lobbyManager.createLobby('offline_player');
     TestAssertions.assertErrorResult(offlineResult, ERROR_TYPES.PLAYER_NOT_FOUND, 'Offline player lobby creation should fail');
   });
 
@@ -111,15 +111,16 @@ async function testLobbyManager() {
     const playerId = createTestPlayer(playerManager);
 
     // Create lobby
-    const createResult = lobbyManager.createLobby(hostId);
+    const createResult = await lobbyManager.createLobby(hostId);
     const lobbyCode = createResult.lobby.code;
 
     // Join as player
-    const joinResult = lobbyManager.joinLobby(playerId, lobbyCode, PLAYER_ROLES.PLAYER);
+    const joinResult = await lobbyManager.joinLobby(playerId, lobbyCode, PLAYER_ROLES.PLAYER);
+    const playerAddress = playerManager.getPlayerData(playerId).address;
 
     TestAssertions.assertSuccessResult(joinResult, 'Joining lobby should succeed');
     TestAssertions.assertEquals(joinResult.role, PLAYER_ROLES.PLAYER, 'Role should be player');
-    TestAssertions.assertArrayContains(joinResult.lobby.players, playerId, 'Player should be in players list');
+    TestAssertions.assertArrayContains(joinResult.lobby.players, playerAddress, 'Player should be in players list');
     TestAssertions.assertEquals(joinResult.lobby.status, LOBBY_STATUS.READY, 'Lobby should be ready with 2 players');
 
     const stats = lobbyManager.getStats();
@@ -137,15 +138,16 @@ async function testLobbyManager() {
     const spectatorId = createTestPlayer(playerManager);
 
     // Create lobby with 2 players (full)
-    const createResult = lobbyManager.createLobby(hostId);
-    lobbyManager.joinLobby(playerId, createResult.lobby.code, PLAYER_ROLES.PLAYER);
+    const createResult = await lobbyManager.createLobby(hostId);
+    await lobbyManager.joinLobby(playerId, createResult.lobby.code, PLAYER_ROLES.PLAYER);
 
     // Try to join as third player (should become spectator)
-    const joinResult = lobbyManager.joinLobby(spectatorId, createResult.lobby.code, PLAYER_ROLES.PLAYER);
+    const joinResult = await lobbyManager.joinLobby(spectatorId, createResult.lobby.code, PLAYER_ROLES.PLAYER);
+    const spectatorAddress = playerManager.getPlayerData(spectatorId).address;
 
     TestAssertions.assertSuccessResult(joinResult, 'Joining full lobby should succeed as spectator');
     TestAssertions.assertEquals(joinResult.role, PLAYER_ROLES.SPECTATOR, 'Role should be spectator when players full');
-    TestAssertions.assertArrayContains(joinResult.lobby.spectators, spectatorId, 'Should be in spectators list');
+    TestAssertions.assertArrayContains(joinResult.lobby.spectators, spectatorAddress, 'Should be in spectators list');
     TestAssertions.assertEquals(joinResult.lobby.players.length, 2, 'Players count should remain 2');
   });
 
@@ -159,12 +161,12 @@ async function testLobbyManager() {
     const playerId = createTestPlayer(playerManager);
 
     // Create lobby and join
-    const createResult = lobbyManager.createLobby(hostId);
+    const createResult = await lobbyManager.createLobby(hostId);
     const lobbyCode = createResult.lobby.code;
-    lobbyManager.joinLobby(playerId, lobbyCode);
+    await lobbyManager.joinLobby(playerId, lobbyCode);
 
     // Player leaves
-    const leaveResult = lobbyManager.leaveLobby(playerId);
+    const leaveResult = await lobbyManager.leaveLobby(playerId);
 
     TestAssertions.assertSuccessResult(leaveResult, 'Leaving lobby should succeed');
     TestAssertions.assertArrayNotContains(leaveResult.lobby.players, playerId, 'Player should not be in players list');
@@ -184,17 +186,19 @@ async function testLobbyManager() {
     const playerId = createTestPlayer(playerManager);
 
     // Create lobby and join
-    const createResult = lobbyManager.createLobby(hostId);
+    const createResult = await lobbyManager.createLobby(hostId);
     const lobbyCode = createResult.lobby.code;
-    lobbyManager.joinLobby(playerId, lobbyCode);
+    await lobbyManager.joinLobby(playerId, lobbyCode);
 
     // Host leaves
-    const leaveResult = lobbyManager.leaveLobby(hostId);
+    const leaveResult = await lobbyManager.leaveLobby(hostId);
+    const hostAddress = playerManager.getPlayerData(hostId).address;
+    const playerAddress = playerManager.getPlayerData(playerId).address;
 
     TestAssertions.assertSuccessResult(leaveResult, 'Host leaving should succeed');
-    TestAssertions.assertEquals(leaveResult.lobby.host, playerId, 'Host should be transferred to remaining player');
-    TestAssertions.assertArrayNotContains(leaveResult.lobby.players, hostId, 'Original host should not be in players');
-    TestAssertions.assertArrayContains(leaveResult.lobby.players, playerId, 'New host should remain in players');
+    TestAssertions.assertEquals(leaveResult.lobby.host, playerAddress, 'Host should be transferred to remaining player');
+    TestAssertions.assertArrayNotContains(leaveResult.lobby.players, hostAddress, 'Original host should not be in players');
+    TestAssertions.assertArrayContains(leaveResult.lobby.players, playerAddress, 'New host should remain in players');
   });
 
   // Test 9: Lobby closure when last player leaves
@@ -206,11 +210,11 @@ async function testLobbyManager() {
     const hostId = createTestPlayer(playerManager);
 
     // Create lobby
-    const createResult = lobbyManager.createLobby(hostId);
+    const createResult = await lobbyManager.createLobby(hostId);
     TestAssertions.assertEquals(lobbyManager.getStats().totalLobbies, 1, 'Should have 1 lobby');
 
     // Host leaves (only player)
-    const leaveResult = lobbyManager.leaveLobby(hostId);
+    const leaveResult = await lobbyManager.leaveLobby(hostId);
 
     TestAssertions.assertSuccessResult(leaveResult, 'Host leaving should succeed');
     TestAssertions.assertTrue(leaveResult.lobbyClosed, 'Lobby should be marked as closed');
@@ -228,18 +232,20 @@ async function testLobbyManager() {
 
     const hostId = createTestPlayer(playerManager);
     const targetId = createTestPlayer(playerManager);
+    const hostAddress = playerManager.getPlayerData(hostId).address;
+    const targetAddress = playerManager.getPlayerData(targetId).address;
 
     // Create lobby
-    const createResult = lobbyManager.createLobby(hostId);
+    const createResult = await lobbyManager.createLobby(hostId);
 
     // Send invitation
-    const inviteResult = lobbyManager.invitePlayer(hostId, targetId);
+    const inviteResult = await lobbyManager.invitePlayer(hostId, targetAddress);
     TestAssertions.assertSuccessResult(inviteResult, 'Sending invitation should succeed');
 
     // Accept invitation
-    const acceptResult = lobbyManager.acceptInvitation(targetId, hostId, createResult.lobby.code);
+    const acceptResult = await lobbyManager.acceptInvitation(targetId, hostAddress, createResult.lobby.code);
     TestAssertions.assertSuccessResult(acceptResult, 'Accepting invitation should succeed');
-    TestAssertions.assertArrayContains(acceptResult.lobby.players, targetId, 'Target should join lobby after accepting');
+    TestAssertions.assertArrayContains(acceptResult.lobby.players, targetAddress, 'Target should join lobby after accepting');
   });
 
   // Test 11: Invitation validation
@@ -250,20 +256,22 @@ async function testLobbyManager() {
 
     const hostId = createTestPlayer(playerManager);
     const targetId = createTestPlayer(playerManager);
+    const targetAddress = playerManager.getPlayerData(targetId).address;
 
     // Try to invite without lobby (should fail)
-    const noLobbyInvite = lobbyManager.invitePlayer(hostId, targetId);
+    const noLobbyInvite = await lobbyManager.invitePlayer(hostId, targetAddress);
     TestAssertions.assertErrorResult(noLobbyInvite, ERROR_TYPES.LOBBY_NOT_FOUND, 'Invite without lobby should fail');
 
     // Try to invite offline player (should fail)
-    lobbyManager.createLobby(hostId);
-    const offlineInvite = lobbyManager.invitePlayer(hostId, 'offline_player');
+    await lobbyManager.createLobby(hostId);
+    const offlineInvite = await lobbyManager.invitePlayer(hostId, 'offline_player');
     TestAssertions.assertErrorResult(offlineInvite, ERROR_TYPES.PLAYER_NOT_FOUND, 'Invite offline player should fail');
 
     // Try to invite player already in lobby (should fail)
     const hostTargetId = createTestPlayer(playerManager);
-    lobbyManager.createLobby(hostTargetId); // Target is now in another lobby
-    const alreadyInLobby = lobbyManager.invitePlayer(hostId, hostTargetId);
+    const hostTargetAddress = playerManager.getPlayerData(hostTargetId).address;
+    await lobbyManager.createLobby(hostTargetId); // Target is now in another lobby
+    const alreadyInLobby = await lobbyManager.invitePlayer(hostId, hostTargetAddress);
     TestAssertions.assertErrorResult(alreadyInLobby, ERROR_TYPES.ALREADY_IN_LOBBY, 'Invite player in lobby should fail');
   });
 
@@ -275,18 +283,20 @@ async function testLobbyManager() {
 
     const hostId = createTestPlayer(playerManager);
     const targetId = createTestPlayer(playerManager);
+    const hostAddress = playerManager.getPlayerData(hostId).address;
+    const targetAddress = playerManager.getPlayerData(targetId).address;
 
     // Create lobby and send invitation
-    const createResult = lobbyManager.createLobby(hostId);
-    lobbyManager.invitePlayer(hostId, targetId);
+    const createResult = await lobbyManager.createLobby(hostId);
+    await lobbyManager.invitePlayer(hostId, targetAddress);
 
     // Decline invitation
-    const declineResult = lobbyManager.declineInvitation(targetId, hostId, createResult.lobby.code);
+    const declineResult = await lobbyManager.declineInvitation(targetId, hostAddress, createResult.lobby.code);
     TestAssertions.assertSuccessResult(declineResult, 'Declining invitation should succeed');
 
     // Verify target is not in lobby
     const lobbyInfo = lobbyManager.getLobbyInfo(createResult.lobby.code);
-    TestAssertions.assertArrayNotContains(lobbyInfo.lobby.players, targetId, 'Target should not be in lobby after decline');
+    TestAssertions.assertArrayNotContains(lobbyInfo.lobby.players, targetAddress, 'Target should not be in lobby after decline');
   });
 
   // Test 13: Kick player functionality
@@ -297,18 +307,19 @@ async function testLobbyManager() {
 
     const hostId = createTestPlayer(playerManager);
     const playerId = createTestPlayer(playerManager);
+    const playerAddress = playerManager.getPlayerData(playerId).address;
 
     // Create lobby and join
-    const createResult = lobbyManager.createLobby(hostId);
-    lobbyManager.joinLobby(playerId, createResult.lobby.code);
+    const createResult = await lobbyManager.createLobby(hostId);
+    await lobbyManager.joinLobby(playerId, createResult.lobby.code);
 
     // Host kicks player
-    const kickResult = lobbyManager.kickPlayer(hostId, playerId);
+    const kickResult = await lobbyManager.kickPlayer(hostId, playerAddress);
     TestAssertions.assertSuccessResult(kickResult, 'Kicking player should succeed');
 
     // Verify player is removed
     const lobbyInfo = lobbyManager.getLobbyInfo(createResult.lobby.code);
-    TestAssertions.assertArrayNotContains(lobbyInfo.lobby.players, playerId, 'Kicked player should not be in lobby');
+    TestAssertions.assertArrayNotContains(lobbyInfo.lobby.players, playerAddress, 'Kicked player should not be in lobby');
   });
 
   // Test 14: Kick player validation
@@ -319,17 +330,19 @@ async function testLobbyManager() {
 
     const hostId = createTestPlayer(playerManager);
     const playerId = createTestPlayer(playerManager);
+    const hostAddress = playerManager.getPlayerData(hostId).address;
+    const playerAddress = playerManager.getPlayerData(playerId).address;
 
     // Create lobby and add player
-    const createResult = lobbyManager.createLobby(hostId);
-    lobbyManager.joinLobby(playerId, createResult.lobby.code);
+    const createResult = await lobbyManager.createLobby(hostId);
+    await lobbyManager.joinLobby(playerId, createResult.lobby.code);
 
     // Try to kick as non-host (should fail)
-    const nonHostKick = lobbyManager.kickPlayer(playerId, hostId);
+    const nonHostKick = await lobbyManager.kickPlayer(playerId, hostAddress);
     TestAssertions.assertErrorResult(nonHostKick, ERROR_TYPES.PERMISSION_DENIED, 'Non-host kick should fail');
 
     // Try host kicking themselves (should fail)
-    const selfKick = lobbyManager.kickPlayer(hostId, hostId);
+    const selfKick = await lobbyManager.kickPlayer(hostId, hostAddress);
     TestAssertions.assertErrorResult(selfKick, ERROR_TYPES.PERMISSION_DENIED, 'Host self-kick should fail');
   });
 
@@ -341,32 +354,33 @@ async function testLobbyManager() {
 
     const hostId = createTestPlayer(playerManager);
     const playerId = createTestPlayer(playerManager);
+    const playerAddress = playerManager.getPlayerData(playerId).address;
 
     // Create lobby
-    const createResult = lobbyManager.createLobby(hostId);
+    const createResult = await lobbyManager.createLobby(hostId);
     const lobbyCode = createResult.lobby.code;
 
     // Player joins as player, then becomes spectator
-    lobbyManager.joinLobby(playerId, lobbyCode, PLAYER_ROLES.PLAYER);
+    await lobbyManager.joinLobby(playerId, lobbyCode, PLAYER_ROLES.PLAYER);
 
-    const changeToSpectator = lobbyManager.changeRole(playerId, PLAYER_ROLES.SPECTATOR);
+    const changeToSpectator = await lobbyManager.changeRole(playerId, PLAYER_ROLES.SPECTATOR);
     TestAssertions.assertSuccessResult(changeToSpectator, 'Change to spectator should succeed');
     TestAssertions.assertEquals(changeToSpectator.newRole, PLAYER_ROLES.SPECTATOR, 'New role should be spectator');
 
     // Verify player is now in spectators array
     const lobbyInfo1 = lobbyManager.getLobbyInfo(lobbyCode);
-    TestAssertions.assertArrayContains(lobbyInfo1.lobby.spectators, playerId, 'Player should be in spectators');
-    TestAssertions.assertArrayNotContains(lobbyInfo1.lobby.players, playerId, 'Player should not be in players');
+    TestAssertions.assertArrayContains(lobbyInfo1.lobby.spectators, playerAddress, 'Player should be in spectators');
+    TestAssertions.assertArrayNotContains(lobbyInfo1.lobby.players, playerAddress, 'Player should not be in players');
 
     // Change back to player
-    const changeToPlayer = lobbyManager.changeRole(playerId, PLAYER_ROLES.PLAYER);
+    const changeToPlayer = await lobbyManager.changeRole(playerId, PLAYER_ROLES.PLAYER);
     TestAssertions.assertSuccessResult(changeToPlayer, 'Change to player should succeed');
     TestAssertions.assertEquals(changeToPlayer.newRole, PLAYER_ROLES.PLAYER, 'New role should be player');
 
     // Verify player is now in players array
     const lobbyInfo2 = lobbyManager.getLobbyInfo(lobbyCode);
-    TestAssertions.assertArrayContains(lobbyInfo2.lobby.players, playerId, 'Player should be in players');
-    TestAssertions.assertArrayNotContains(lobbyInfo2.lobby.spectators, playerId, 'Player should not be in spectators');
+    TestAssertions.assertArrayContains(lobbyInfo2.lobby.players, playerAddress, 'Player should be in players');
+    TestAssertions.assertArrayNotContains(lobbyInfo2.lobby.spectators, playerAddress, 'Player should not be in spectators');
   });
 
   // Test 16: Role change validation
@@ -378,18 +392,18 @@ async function testLobbyManager() {
     const hostId = createTestPlayer(playerManager);
 
     // Create lobby
-    lobbyManager.createLobby(hostId);
+    await lobbyManager.createLobby(hostId);
 
     // Try to change to invalid role
-    const invalidRole = lobbyManager.changeRole(hostId, 'invalid_role');
+    const invalidRole = await lobbyManager.changeRole(hostId, 'invalid_role');
     TestAssertions.assertErrorResult(invalidRole, ERROR_TYPES.INVALID_PAYLOAD, 'Invalid role should fail');
 
     // Try to change to same role
-    const sameRole = lobbyManager.changeRole(hostId, PLAYER_ROLES.PLAYER);
+    const sameRole = await lobbyManager.changeRole(hostId, PLAYER_ROLES.PLAYER);
     TestAssertions.assertErrorResult(sameRole, ERROR_TYPES.INVALID_PAYLOAD, 'Same role should fail');
 
     // Try to change role for non-existent player
-    const nonExistent = lobbyManager.changeRole('non_existent_player', PLAYER_ROLES.SPECTATOR);
+    const nonExistent = await lobbyManager.changeRole('non_existent_player', PLAYER_ROLES.SPECTATOR);
     TestAssertions.assertErrorResult(nonExistent, ERROR_TYPES.LOBBY_NOT_FOUND, 'Non-existent player should fail');
   });
 
@@ -401,12 +415,13 @@ async function testLobbyManager() {
 
     const hostId = createTestPlayer(playerManager);
     const playerId = createTestPlayer(playerManager);
+    const hostAddress = playerManager.getPlayerData(hostId).address;
     const testMessage = 'Hello lobby!';
 
     // Create lobby and join
-    const createResult = lobbyManager.createLobby(hostId);
+    const createResult = await lobbyManager.createLobby(hostId);
     const lobbyCode = createResult.lobby.code;
-    lobbyManager.joinLobby(playerId, lobbyCode);
+    await lobbyManager.joinLobby(playerId, lobbyCode);
 
     // Send chat message
     const chatResult = lobbyManager.sendLobbyChat(hostId, testMessage);
@@ -416,7 +431,7 @@ async function testLobbyManager() {
     const lobbyInfo = lobbyManager.getLobbyInfo(lobbyCode);
     TestAssertions.assertEquals(lobbyInfo.lobby.chatHistory.length, 1, 'Should have 1 chat message');
     TestAssertions.assertEquals(lobbyInfo.lobby.chatHistory[0].message, testMessage, 'Message should be stored correctly');
-    TestAssertions.assertEquals(lobbyInfo.lobby.chatHistory[0].playerId, hostId, 'Sender should be stored correctly');
+    TestAssertions.assertEquals(lobbyInfo.lobby.chatHistory[0].playerId, hostAddress, 'Sender should be stored correctly');
   });
 
   // Test 18: Get lobby information
@@ -429,7 +444,7 @@ async function testLobbyManager() {
     const playerId = createTestPlayer(playerManager);
 
     // Create lobby
-    const createResult = lobbyManager.createLobby(hostId);
+    const createResult = await lobbyManager.createLobby(hostId);
     const lobbyCode = createResult.lobby.code;
 
     // Get info as host
@@ -439,7 +454,7 @@ async function testLobbyManager() {
     TestAssertions.assertEquals(hostInfo.playerRole, PLAYER_ROLES.PLAYER, 'Host role should be correct');
 
     // Join and get info as player
-    lobbyManager.joinLobby(playerId, lobbyCode);
+    await lobbyManager.joinLobby(playerId, lobbyCode);
     const playerInfo = lobbyManager.getLobbyInfo(lobbyCode, playerId);
     TestAssertions.assertFalse(playerInfo.isHost, 'Player should not be identified as host');
     TestAssertions.assertEquals(playerInfo.playerRole, PLAYER_ROLES.PLAYER, 'Player role should be correct');
@@ -463,15 +478,15 @@ async function testLobbyManager() {
     ];
 
     // Create lobbies
-    const lobbies = hosts.map(host => lobbyManager.createLobby(host));
+    const lobbies = await Promise.all(hosts.map(host => lobbyManager.createLobby(host)));
 
     // Add players to second lobby to make it ready
     const player2 = createTestPlayer(playerManager);
-    lobbyManager.joinLobby(player2, lobbies[1].lobby.code);
+    await lobbyManager.joinLobby(player2, lobbies[1].lobby.code);
 
     // Third lobby with 2 players (ready status)
     const player3 = createTestPlayer(playerManager);
-    lobbyManager.joinLobby(player3, lobbies[2].lobby.code);
+    await lobbyManager.joinLobby(player3, lobbies[2].lobby.code);
 
     const stats = lobbyManager.getStats();
     TestAssertions.assertEquals(stats.totalLobbies, 3, 'Should have 3 lobbies');
@@ -487,19 +502,19 @@ async function testLobbyManager() {
     const lobbyManager = new LobbyManager(logger, playerManager, channelManager);
 
     // Try operations with null/invalid inputs
-    const nullLobbyCreate = lobbyManager.createLobby(null);
+    const nullLobbyCreate = await lobbyManager.createLobby(null);
     TestAssertions.assertErrorResult(nullLobbyCreate, ERROR_TYPES.INVALID_PAYLOAD, 'Null host should fail');
 
-    const emptyLobbyJoin = lobbyManager.joinLobby('', 'TESTCODE');
+    const emptyLobbyJoin = await lobbyManager.joinLobby('', 'TESTCODE');
     TestAssertions.assertErrorResult(emptyLobbyJoin, ERROR_TYPES.INVALID_PAYLOAD, 'Empty player ID should fail');
 
-    const invalidLobbyLeave = lobbyManager.leaveLobby('nonexistent_player');
+    const invalidLobbyLeave = await lobbyManager.leaveLobby('nonexistent_player');
     TestAssertions.assertErrorResult(invalidLobbyLeave, ERROR_TYPES.LOBBY_NOT_FOUND, 'Non-existent player leave should fail');
 
     // Test with very long message
     const longMessage = 'x'.repeat(600);
     const hostId = createTestPlayer(playerManager);
-    lobbyManager.createLobby(hostId);
+    await lobbyManager.createLobby(hostId);
     const longChatResult = lobbyManager.sendLobbyChat(hostId, longMessage);
     TestAssertions.assertSuccessResult(longChatResult, 'Long message should be handled');
   });
