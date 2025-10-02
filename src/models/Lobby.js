@@ -15,6 +15,13 @@ class Lobby {
    * @param {string} id - Database ID (optional, for loaded lobbies)
    */
   constructor(code, hostClient, playerManager = null, id = null) {
+    console.log('[Lobby constructor] Creating lobby', {
+      code,
+      hasHostClient: !!hostClient,
+      hasPlayerManager: !!playerManager,
+      id
+    });
+
     // Database fields
     this.id = id;                        // UUID from database
     this.code = code;                    // Unique 6-character lobby code
@@ -23,17 +30,32 @@ class Lobby {
     this.lastActivity = Date.now();      // Timestamp of last activity
     this.currentMatch = null;            // Current match ID (if any)
 
+    console.log('[Lobby constructor] Database fields set', {
+      id: this.id,
+      code: this.code,
+      status: this.status,
+      created: this.created
+    });
+
     // In-memory fields (WebSocket connections)
     this.host = hostClient;              // WebSocket connection of the lobby host
     this.players = [hostClient];         // Array of active player WebSocket connections (max 2 for 1v1)
     this.spectators = [];                // Array of spectator WebSocket connections (max 10)
     this.chatHistory = [];               // Array of chat message objects (loaded from DB)
 
+    console.log('[Lobby constructor] In-memory fields set', {
+      hasHost: !!this.host,
+      playersCount: this.players.length,
+      spectatorsCount: this.spectators.length
+    });
+
     // Helper reference for getting display information
     this.playerManager = playerManager;
 
     // Track if lobby needs to be saved to DB
     this._isDirty = false;
+
+    console.log('[Lobby constructor] Lobby instance created successfully');
   }
 
   /**
@@ -291,43 +313,101 @@ class Lobby {
    * @returns {Promise<Object>} Database lobby object
    */
   async save() {
+    console.log('[Lobby.save] Starting save operation', {
+      hasId: !!this.id,
+      code: this.code,
+      playersCount: this.players.length,
+      spectatorsCount: this.spectators.length
+    });
+
     const prisma = getPrismaClient();
+    console.log('[Lobby.save] Got Prisma client', { hasPrisma: !!prisma });
+
     const hostAddress = this.getClientAddress(this.host);
+    console.log('[Lobby.save] Got host address', { hostAddress });
 
     try {
       if (!this.id) {
-        // Create new lobby in database
+        console.log('[Lobby.save] Creating NEW lobby in database');
+
+        // Prepare player data
+        const playerData = this.players.map(client => {
+          const address = this.getClientAddress(client);
+          console.log('[Lobby.save] Player data:', { address, role: PLAYER_ROLES.PLAYER });
+          return {
+            playerAddress: address,
+            role: PLAYER_ROLES.PLAYER
+          };
+        });
+
+        const spectatorData = this.spectators.map(client => {
+          const address = this.getClientAddress(client);
+          console.log('[Lobby.save] Spectator data:', { address, role: PLAYER_ROLES.SPECTATOR });
+          return {
+            playerAddress: address,
+            role: PLAYER_ROLES.SPECTATOR
+          };
+        });
+
+        const allPlayers = playerData.concat(spectatorData);
+        console.log('[Lobby.save] All players data prepared', { count: allPlayers.length });
+
+        const createData = {
+          code: this.code,
+          hostAddress,
+          status: this.status,
+          created: new Date(this.created),
+          lastActivity: new Date(this.lastActivity),
+          currentMatch: this.currentMatch,
+          players: {
+            create: allPlayers
+          }
+        };
+
+        console.log('[Lobby.save] Create data prepared', {
+          code: createData.code,
+          hostAddress: createData.hostAddress,
+          status: createData.status,
+          playersToCreate: allPlayers.length
+        });
+
+        console.log('[Lobby.save] Calling prisma.lobby.create...');
         const lobby = await prisma.lobby.create({
-          data: {
-            code: this.code,
-            hostAddress,
-            status: this.status,
-            created: new Date(this.created),
-            lastActivity: new Date(this.lastActivity),
-            currentMatch: this.currentMatch,
-            players: {
-              create: this.players.map(client => ({
-                playerAddress: this.getClientAddress(client),
-                role: PLAYER_ROLES.PLAYER
-              })).concat(
-                this.spectators.map(client => ({
-                  playerAddress: this.getClientAddress(client),
-                  role: PLAYER_ROLES.SPECTATOR
-                }))
-              )
-            }
-          },
+          data: createData,
           include: {
             players: true,
             chatMessages: true
           }
         });
 
+        console.log('[Lobby.save] Lobby created in database', {
+          id: lobby.id,
+          code: lobby.code,
+          playersInDb: lobby.players.length
+        });
+
         this.id = lobby.id;
         this._isDirty = false;
         return lobby;
       } else {
-        // Update existing lobby
+        console.log('[Lobby.save] UPDATING existing lobby in database', { id: this.id });
+
+        // Prepare player data
+        const playerData = this.players.map(client => ({
+          playerAddress: this.getClientAddress(client),
+          role: PLAYER_ROLES.PLAYER
+        }));
+
+        const spectatorData = this.spectators.map(client => ({
+          playerAddress: this.getClientAddress(client),
+          role: PLAYER_ROLES.SPECTATOR
+        }));
+
+        const allPlayers = playerData.concat(spectatorData);
+        console.log('[Lobby.save] Update data prepared', {
+          playersToCreate: allPlayers.length
+        });
+
         const lobby = await prisma.lobby.update({
           where: { id: this.id },
           data: {
@@ -337,15 +417,7 @@ class Lobby {
             currentMatch: this.currentMatch,
             players: {
               deleteMany: {},
-              create: this.players.map(client => ({
-                playerAddress: this.getClientAddress(client),
-                role: PLAYER_ROLES.PLAYER
-              })).concat(
-                this.spectators.map(client => ({
-                  playerAddress: this.getClientAddress(client),
-                  role: PLAYER_ROLES.SPECTATOR
-                }))
-              )
+              create: allPlayers
             }
           },
           include: {
@@ -354,10 +426,22 @@ class Lobby {
           }
         });
 
+        console.log('[Lobby.save] Lobby updated in database', {
+          id: lobby.id,
+          playersInDb: lobby.players.length
+        });
+
         this._isDirty = false;
         return lobby;
       }
     } catch (error) {
+      console.error('[Lobby.save] ERROR saving lobby:', error);
+      console.error('[Lobby.save] Error details:', {
+        message: error.message,
+        code: error.code,
+        meta: error.meta,
+        stack: error.stack
+      });
       throw new Error(`Failed to save lobby: ${error.message}`);
     }
   }

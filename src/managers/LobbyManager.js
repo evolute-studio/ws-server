@@ -120,8 +120,14 @@ class LobbyManager {
    */
   async createLobby(hostClient) {
     try {
+      this.logger.debug('[createLobby] Starting lobby creation', {
+        hasHostClient: !!hostClient,
+        hostClientType: typeof hostClient
+      });
+
       // Validate host client
       if (!hostClient) {
+        this.logger.debug('[createLobby] Validation failed: no host client');
         return {
           success: false,
           error: ERROR_TYPES.INVALID_PAYLOAD,
@@ -130,7 +136,15 @@ class LobbyManager {
       }
 
       // Check if client is already in a lobby
-      if (this.clientLobbies.has(hostClient)) {
+      const isInLobby = this.clientLobbies.has(hostClient);
+      this.logger.debug('[createLobby] Checking if client already in lobby', {
+        isInLobby,
+        clientLobbiesSize: this.clientLobbies.size
+      });
+
+      if (isInLobby) {
+        const existingLobbyCode = this.clientLobbies.get(hostClient);
+        this.logger.debug('[createLobby] Client already in lobby', { existingLobbyCode });
         return {
           success: false,
           error: ERROR_TYPES.ALREADY_IN_LOBBY,
@@ -139,7 +153,16 @@ class LobbyManager {
       }
 
       // Check if client is online
-      if (!this.playerManager.isOnline(hostClient)) {
+      const isOnline = this.playerManager.isOnline(hostClient);
+      const playerData = this.playerManager.getPlayerData(hostClient);
+      this.logger.debug('[createLobby] Checking if client is online', {
+        isOnline,
+        hasPlayerData: !!playerData,
+        playerAddress: playerData?.address
+      });
+
+      if (!isOnline) {
+        this.logger.debug('[createLobby] Client is not online');
         return {
           success: false,
           error: ERROR_TYPES.PLAYER_NOT_FOUND,
@@ -148,28 +171,62 @@ class LobbyManager {
       }
 
       const code = this.generateLobbyCode();
+      this.logger.debug('[createLobby] Generated lobby code', { code });
+
+      this.logger.debug('[createLobby] Creating new Lobby instance', {
+        code,
+        hostClient: !!hostClient,
+        playerManager: !!this.playerManager
+      });
+
       const lobby = new Lobby(code, hostClient, this.playerManager);
 
+      this.logger.debug('[createLobby] Lobby instance created', {
+        lobbyId: lobby.id,
+        lobbyCode: lobby.code,
+        hostAddress: lobby.host
+      });
+
       // Save lobby to database
+      this.logger.debug('[createLobby] Saving lobby to database...');
       await lobby.save();
+      this.logger.debug('[createLobby] Lobby saved to database', {
+        lobbyId: lobby.id,
+        dbSaved: true
+      });
 
       this.lobbies.set(code, lobby);
       this.clientLobbies.set(hostClient, code);
 
+      this.logger.debug('[createLobby] Lobby added to in-memory maps', {
+        lobbiesSize: this.lobbies.size,
+        clientLobbiesSize: this.clientLobbies.size
+      });
+
       // Subscribe host to lobby channel
-      this.channelManager.subscribe(hostClient, `lobby_${code}`);
+      const channelName = `lobby_${code}`;
+      this.logger.debug('[createLobby] Subscribing host to lobby channel', { channelName });
+      this.channelManager.subscribe(hostClient, channelName);
 
       const hostAddress = this.playerManager.getPlayerData(hostClient)?.address || 'unknown';
       this.logger.info(`Lobby created: ${code} by ${hostAddress} (ID: ${lobby.id})`);
 
+      const clientData = lobby.toClientData();
+      this.logger.debug('[createLobby] Lobby client data prepared', {
+        clientDataKeys: Object.keys(clientData),
+        playersCount: clientData.players?.length,
+        spectatorsCount: clientData.spectators?.length
+      });
+
       return {
         success: true,
-        lobby: lobby.toClientData(),
+        lobby: clientData,
         event: EVENTS.LOBBY_CREATED
       };
 
     } catch (error) {
-      this.logger.error('Error creating lobby:', error);
+      this.logger.error('[createLobby] Error creating lobby:', error);
+      this.logger.error('[createLobby] Error stack:', error.stack);
       return {
         success: false,
         error: ERROR_TYPES.LOBBY_NOT_FOUND,
