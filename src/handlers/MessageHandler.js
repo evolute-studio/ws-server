@@ -34,7 +34,17 @@ class MessageHandler {
         return;
       }
 
-      const { action, channel, payload } = data;
+      let { action, channel, payload } = data;
+
+      // Parse payload if it's a JSON string
+      if (typeof payload === 'string' && payload.trim().startsWith('{')) {
+        try {
+          payload = JSON.parse(payload);
+        } catch (e) {
+          // If parsing fails, keep as string
+          this.logger.debug('Payload is a string but not valid JSON, keeping as is');
+        }
+      }
 
       this.logger.debug(`Handling action: ${action}`, payload);
 

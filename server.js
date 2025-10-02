@@ -21,7 +21,7 @@ const { disconnectPrisma } = require('./src/utils/prisma');
  */
 class EvoluteWebSocketServer {
   constructor() {
-    this.logger = new Logger('EvoluteWS', process.env.LOG_LEVEL || 'info');
+    this.logger = new Logger('EvoluteWS', process.env.LOG_LEVEL || 'debug');
     this.server = null;
     this.messageHandler = null;
 

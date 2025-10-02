@@ -882,7 +882,7 @@ class LobbyManager {
   broadcastToLobby(lobbyCode, event, payload) {
     this.channelManager.publish(`lobby_${lobbyCode}`, {
       action: event,
-      payload
+      ...payload
     });
   }
 
