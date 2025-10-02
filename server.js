@@ -20,7 +20,7 @@ const MessageHandler = require('./src/handlers/MessageHandler');
  */
 class EvoluteWebSocketServer {
   constructor() {
-    this.logger = new Logger('EvoluteWS', process.env.LOG_LEVEL || 'info');
+    this.logger = new Logger('EvoluteWS', process.env.LOG_LEVEL || 'debug');
     this.server = null;
     this.messageHandler = null;
 
